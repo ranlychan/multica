@@ -140,6 +140,22 @@ var pgBigmOperatorClass = extensionOperatorClass{
 // they are still pending: a fresh self-hosted install, which is exactly where an
 // interrupted build would otherwise leave a permanently unusable index.
 var concurrentIndexCleanups = map[string]string{
+	"565_workflow_workspace_slug_index":                         "idx_workflow_workspace_slug",
+	"566_workflow_workspace_index":                              "idx_workflow_workspace_created",
+	"568_workflow_trigger_workflow_index":                       "idx_workflow_trigger_workflow",
+	"569_workflow_trigger_next_run_index":                       "idx_workflow_trigger_next_run",
+	"571_workflow_run_hatchet_id_index":                         "idx_workflow_run_hatchet_id",
+	"572_workflow_run_workflow_index":                           "idx_workflow_run_workflow",
+	"573_workflow_run_active_index":                             "idx_workflow_run_active",
+	"575_workflow_runner_token_hash_index":                      "idx_workflow_runner_token_hash",
+	"576_workflow_runner_token_workspace_index":                 "idx_workflow_runner_token_workspace_daemon",
+	"580_agent_task_queue_workflow_run_index":                   "idx_agent_task_queue_workflow_run",
+	"582_workflow_revision_version_index":                       "idx_workflow_revision_version",
+	"583_workflow_trigger_token_hash_index":                     "idx_workflow_trigger_token_hash",
+	"584_workflow_run_planned_index":                            "idx_workflow_run_planned",
+	"586_workflow_collaborator_index":                           "idx_workflow_collaborator",
+	"589_workflow_operation_key_index":                          "idx_workflow_operation_key",
+	"590_workflow_revision_hatchet_name_index":                  "idx_workflow_revision_hatchet_name",
 	"563_search_index_change_changed_at_index":                  "idx_search_index_change_changed_at",
 	"562_search_index_change_workspace_index":                   "idx_search_index_change_workspace_xid",
 	"552_agent_task_history_page_index":                         "idx_agent_task_queue_history_page",

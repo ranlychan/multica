@@ -178,6 +178,7 @@ type AgentTaskQueue struct {
 	CancelledByID             pgtype.UUID `json:"cancelled_by_id"`
 	CancelledByName           pgtype.Text `json:"cancelled_by_name"`
 	IssueSnapshot             []byte      `json:"issue_snapshot"`
+	WorkflowRunID             pgtype.UUID `json:"workflow_run_id"`
 }
 
 type AgentToLabel struct {
@@ -1698,6 +1699,147 @@ type WebhookDelivery struct {
 	DispatchAttempts       int32              `json:"dispatch_attempts"`
 	ReasonCode             pgtype.Text        `json:"reason_code"`
 	ReplayIdempotencyKey   pgtype.Text        `json:"replay_idempotency_key"`
+}
+
+type Workflow struct {
+	ID                pgtype.UUID        `json:"id"`
+	WorkspaceID       pgtype.UUID        `json:"workspace_id"`
+	ProjectID         pgtype.UUID        `json:"project_id"`
+	Name              string             `json:"name"`
+	Slug              string             `json:"slug"`
+	Description       pgtype.Text        `json:"description"`
+	HatchetName       string             `json:"hatchet_name"`
+	CurrentRevisionID pgtype.UUID        `json:"current_revision_id"`
+	DefinitionVersion int32              `json:"definition_version"`
+	Status            string             `json:"status"`
+	DefaultAgentID    pgtype.UUID        `json:"default_agent_id"`
+	CreatedByType     string             `json:"created_by_type"`
+	CreatedByID       pgtype.UUID        `json:"created_by_id"`
+	LastRunAt         pgtype.Timestamptz `json:"last_run_at"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+}
+
+type WorkflowCollaborator struct {
+	ID          pgtype.UUID        `json:"id"`
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	WorkflowID  pgtype.UUID        `json:"workflow_id"`
+	UserID      pgtype.UUID        `json:"user_id"`
+	Role        string             `json:"role"`
+	CreatedByID pgtype.UUID        `json:"created_by_id"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type WorkflowHatchetTenant struct {
+	WorkspaceID           pgtype.UUID        `json:"workspace_id"`
+	TenantID              string             `json:"tenant_id"`
+	TokenEncrypted        string             `json:"token_encrypted"`
+	DeletionState         string             `json:"deletion_state"`
+	DeletionRequestedAt   pgtype.Timestamptz `json:"deletion_requested_at"`
+	DeletionAttempts      int32              `json:"deletion_attempts"`
+	NextDeletionAttemptAt pgtype.Timestamptz `json:"next_deletion_attempt_at"`
+	DeletionError         pgtype.Text        `json:"deletion_error"`
+	DeletedAt             pgtype.Timestamptz `json:"deleted_at"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt             pgtype.Timestamptz `json:"updated_at"`
+}
+
+type WorkflowOperation struct {
+	ID            pgtype.UUID        `json:"id"`
+	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
+	RunID         pgtype.UUID        `json:"run_id"`
+	StepID        string             `json:"step_id"`
+	OperationKey  string             `json:"operation_key"`
+	OperationName string             `json:"operation_name"`
+	PayloadHash   string             `json:"payload_hash"`
+	Attempt       int32              `json:"attempt"`
+	Status        string             `json:"status"`
+	Result        []byte             `json:"result"`
+	ErrorCode     pgtype.Text        `json:"error_code"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	CompletedAt   pgtype.Timestamptz `json:"completed_at"`
+}
+
+type WorkflowRevision struct {
+	ID                 pgtype.UUID        `json:"id"`
+	WorkspaceID        pgtype.UUID        `json:"workspace_id"`
+	WorkflowID         pgtype.UUID        `json:"workflow_id"`
+	Version            int32              `json:"version"`
+	Definition         string             `json:"definition"`
+	DefinitionLanguage string             `json:"definition_language"`
+	DefinitionHash     string             `json:"definition_hash"`
+	DefinitionGraph    []byte             `json:"definition_graph"`
+	HatchetName        string             `json:"hatchet_name"`
+	ValidationStatus   string             `json:"validation_status"`
+	ValidationError    pgtype.Text        `json:"validation_error"`
+	PublishedAt        pgtype.Timestamptz `json:"published_at"`
+	CreatedByID        pgtype.UUID        `json:"created_by_id"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+}
+
+type WorkflowRun struct {
+	ID                  pgtype.UUID        `json:"id"`
+	WorkspaceID         pgtype.UUID        `json:"workspace_id"`
+	WorkflowID          pgtype.UUID        `json:"workflow_id"`
+	RevisionID          pgtype.UUID        `json:"revision_id"`
+	DefinitionHash      string             `json:"definition_hash"`
+	PrincipalUserID     pgtype.UUID        `json:"principal_user_id"`
+	TriggerID           pgtype.UUID        `json:"trigger_id"`
+	Source              string             `json:"source"`
+	Status              string             `json:"status"`
+	PlannedAt           pgtype.Timestamptz `json:"planned_at"`
+	IdempotencyKey      pgtype.UUID        `json:"idempotency_key"`
+	SubmissionStartedAt pgtype.Timestamptz `json:"submission_started_at"`
+	SubmissionDeadline  pgtype.Timestamptz `json:"submission_deadline"`
+	HatchetRunID        pgtype.UUID        `json:"hatchet_run_id"`
+	Input               []byte             `json:"input"`
+	Output              []byte             `json:"output"`
+	IssueID             pgtype.UUID        `json:"issue_id"`
+	TaskID              pgtype.UUID        `json:"task_id"`
+	OriginatorUserID    pgtype.UUID        `json:"originator_user_id"`
+	AccountableUserID   pgtype.UUID        `json:"accountable_user_id"`
+	OriginatorSource    pgtype.Text        `json:"originator_source"`
+	ReasonCode          pgtype.Text        `json:"reason_code"`
+	FailureReason       pgtype.Text        `json:"failure_reason"`
+	TriggeredAt         pgtype.Timestamptz `json:"triggered_at"`
+	StartedAt           pgtype.Timestamptz `json:"started_at"`
+	FinishedAt          pgtype.Timestamptz `json:"finished_at"`
+	DurationMs          pgtype.Int8        `json:"duration_ms"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+}
+
+type WorkflowRunnerToken struct {
+	ID          pgtype.UUID        `json:"id"`
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	DaemonID    string             `json:"daemon_id"`
+	TokenHash   string             `json:"token_hash"`
+	Label       pgtype.Text        `json:"label"`
+	CreatedByID pgtype.UUID        `json:"created_by_id"`
+	LastUsedAt  pgtype.Timestamptz `json:"last_used_at"`
+	RevokedAt   pgtype.Timestamptz `json:"revoked_at"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type WorkflowTrigger struct {
+	ID          pgtype.UUID `json:"id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	WorkflowID  pgtype.UUID `json:"workflow_id"`
+	Kind        string      `json:"kind"`
+	// Immutable human authority, separate from the member or agent audit actor; membership is revalidated at dispatch.
+	PrincipalUserID pgtype.UUID        `json:"principal_user_id"`
+	Enabled         bool               `json:"enabled"`
+	CronExpression  pgtype.Text        `json:"cron_expression"`
+	Timezone        string             `json:"timezone"`
+	NextRunAt       pgtype.Timestamptz `json:"next_run_at"`
+	InputTemplate   []byte             `json:"input_template"`
+	Label           pgtype.Text        `json:"label"`
+	LastFiredAt     pgtype.Timestamptz `json:"last_fired_at"`
+	TokenHash       pgtype.Text        `json:"token_hash"`
+	CreatedByType   string             `json:"created_by_type"`
+	CreatedByID     pgtype.UUID        `json:"created_by_id"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
 }
 
 type Workspace struct {
