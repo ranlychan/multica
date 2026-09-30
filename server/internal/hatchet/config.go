@@ -57,7 +57,9 @@ func ParseConfig(get func(string) string, applicationDatabaseURL string) (Config
 	if err != nil {
 		return Config{}, errors.New("hatchet: invalid application database identity")
 	}
-	if engine.Database == app.Database && engine.Port == app.Port && sameHost(engine.Host, app.Host) {
+	// Requiring distinct database names fails closed even when DNS aliases,
+	// multi-host fallback, or separate clusters obscure connection identity.
+	if engine.Database == app.Database {
 		return Config{}, errors.New("hatchet: database must be dedicated")
 	}
 	u, err := url.Parse(c.APIURL)
@@ -86,11 +88,4 @@ func privateHost(host string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && (ip.IsLoopback() || ip.IsPrivate())
-}
-
-func sameHost(a, b string) bool {
-	if strings.EqualFold(a, b) {
-		return true
-	}
-	return (strings.EqualFold(a, "localhost") || (net.ParseIP(a) != nil && net.ParseIP(a).IsLoopback())) && (strings.EqualFold(b, "localhost") || (net.ParseIP(b) != nil && net.ParseIP(b).IsLoopback()))
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http/cookiejar"
 	"strings"
 	"sync"
@@ -231,6 +232,59 @@ func (s *TenantService) mint(ctx context.Context, tenant, name, expires string) 
 	return cred, checkCredentials(cred)
 }
 
+// WorkerTokenRevocationError is a server-only retry receipt for an abandoned
+// issuance. It never includes the JWT or provisioning credentials.
+type WorkerTokenRevocationError struct{ TenantID, TokenID string }
+
+func (e *WorkerTokenRevocationError) Error() string {
+	return fmt.Sprintf("hatchet: worker token revocation failed (tenant=%s token=%s)", e.TenantID, e.TokenID)
+}
+
+// RetryWorkerTokenRevocation retries only the token identified by the receipt.
+func (s *TenantService) RetryWorkerTokenRevocation(ctx context.Context, receipt *WorkerTokenRevocationError) error {
+	if receipt == nil || !validID(receipt.TenantID) || !validID(receipt.TokenID) {
+		return errors.New("hatchet: invalid worker revocation receipt")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e := s.login(ctx); e != nil {
+		return receipt
+	}
+	_, e := s.client.request(ctx, "POST", "/api/v1/api-tokens/"+receipt.TokenID, "", nil)
+	if e != nil {
+		return receipt
+	}
+	return nil
+}
+
+func workerTokenID(token string) (string, error) {
+	// The token came directly from the private mint endpoint; this decodes only
+	// its source-proven token_id claim for revocation, never authenticates it.
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return "", errors.New("hatchet: invalid minted worker token")
+	}
+	raw, e := base64.RawURLEncoding.DecodeString(parts[1])
+	if e != nil {
+		return "", errors.New("hatchet: invalid minted worker token")
+	}
+	var claims struct {
+		TokenID string `json:"token_id"`
+	}
+	if json.Unmarshal(raw, &claims) != nil || !validID(claims.TokenID) {
+		return "", errors.New("hatchet: invalid worker token ID")
+	}
+	return claims.TokenID, nil
+}
+func (s *TenantService) abandonWorker(ctx context.Context, tenant, id string, cause error) error {
+	revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if _, e := s.client.request(revokeCtx, "POST", "/api/v1/api-tokens/"+id, "", nil); e != nil {
+		return errors.Join(cause, &WorkerTokenRevocationError{TenantID: tenant, TokenID: id})
+	}
+	return cause
+}
+
 // WorkerCredentials mints a separate tenant-only token. The server token and
 // provisioning cookie never leave this service. Tokens remain discoverable by
 // their reserved name for cleanup even if a caller crashes before delivery.
@@ -255,15 +309,24 @@ func (s *TenantService) WorkerCredentials(ctx context.Context, workspace pgtype.
 	if e != nil {
 		return TenantCredentials{}, e
 	}
+	tokenID, e := workerTokenID(worker.Token)
+	if e != nil {
+		return TenantCredentials{}, e
+	}
 	row, readErr := s.store.GetWorkflowHatchetTenant(ctx, workspace)
-	if readErr != nil || row.DeletionState != "active" {
-		_ = s.revoke(ctx, cred.TenantID)
-		return TenantCredentials{}, ErrUnavailable
+	if readErr != nil {
+		cause := errors.New("hatchet: worker mapping recheck failed")
+		if errors.Is(readErr, pgx.ErrNoRows) {
+			cause = ErrUnavailable
+		}
+		return TenantCredentials{}, s.abandonWorker(ctx, cred.TenantID, tokenID, cause)
+	}
+	if row.DeletionState != "active" {
+		return TenantCredentials{}, s.abandonWorker(ctx, cred.TenantID, tokenID, ErrUnavailable)
 	}
 	if s.queries != nil {
 		if e = s.workspaceExists(ctx, workspace); e != nil {
-			_ = s.revoke(ctx, cred.TenantID)
-			return TenantCredentials{}, ErrUnavailable
+			return TenantCredentials{}, s.abandonWorker(ctx, cred.TenantID, tokenID, e)
 		}
 	}
 	return worker, nil

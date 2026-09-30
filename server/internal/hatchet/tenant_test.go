@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -159,16 +160,109 @@ func TestHatchetTenantSQLFences(t *testing.T) {
 }
 
 type tenantMemory struct {
-	row    db.WorkflowHatchetTenant
-	exists bool
-	stale  bool
+	row           db.WorkflowHatchetTenant
+	exists        bool
+	stale         bool
+	reads         int
+	failReadAfter int
 }
 
 func (m *tenantMemory) GetWorkflowHatchetTenant(context.Context, pgtype.UUID) (db.WorkflowHatchetTenant, error) {
+	m.reads++
+	if m.failReadAfter > 0 && m.reads >= m.failReadAfter {
+		return m.row, errors.New("transient storage failure")
+	}
 	if !m.exists {
 		return m.row, pgx.ErrNoRows
 	}
 	return m.row, nil
+}
+
+const testWorkerToken = "eyJhbGciOiJFUzI1NiJ9.eyJ0b2tlbl9pZCI6IjM0NTY3ODkwLTEyMzQtNDIzNC04MjM0LTEyMzQ1Njc4OWFiYyJ9.signature"
+const testWorkerTokenID = "34567890-1234-4234-8234-123456789abc"
+
+func TestHatchetWorkerTransientReadOnlyRevokesIssuedToken(t *testing.T) {
+	for _, failRevoke := range []bool{false, true} {
+		t.Run(fmt.Sprint(failRevoke), func(t *testing.T) {
+			revoked := []string{}
+			boundary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v1/users/login":
+					http.SetCookie(w, &http.Cookie{Name: "session", Value: "private", Path: "/"})
+					_, _ = w.Write([]byte(`{}`))
+				case "/api/v1/tenants/" + testTenant + "/api-tokens":
+					if r.Method == "POST" {
+						_, _ = w.Write([]byte(`{"token":"` + testWorkerToken + `"}`))
+					} else {
+						_, _ = w.Write([]byte(`{"rows":[{"metadata":{"id":"` + testRun + `"},"name":"multica-server"},{"metadata":{"id":"` + testWorkerTokenID + `"},"name":"multica-worker-new"}]}`))
+					}
+				default:
+					revoked = append(revoked, r.URL.Path)
+					if failRevoke {
+						w.WriteHeader(500)
+					} else {
+						w.WriteHeader(204)
+					}
+				}
+			}))
+			defer boundary.Close()
+			client, _ := NewClient(boundary.URL, boundary.Client())
+			box, _ := secretbox.New(bytes.Repeat([]byte{1}, 32))
+			sealed, _ := box.Seal([]byte("existing-server-secret"))
+			store := &tenantMemory{exists: true, failReadAfter: 2, row: db.WorkflowHatchetTenant{TenantID: testTenant, DeletionState: "active", TokenEncrypted: base64.StdEncoding.EncodeToString(sealed)}}
+			service, _ := NewTenantService(client, store, box, "email", "password")
+			_, err := service.WorkerCredentials(context.Background(), pgtype.UUID{Valid: true}, "new", "1h")
+			if err == nil || errors.Is(err, ErrUnavailable) {
+				t.Fatalf("transient read became deletion: %v", err)
+			}
+			if len(revoked) != 1 || revoked[0] != "/api/v1/api-tokens/"+testWorkerTokenID {
+				t.Fatalf("revoked healthy credentials: %v", revoked)
+			}
+			if failRevoke && !strings.Contains(err.Error(), testWorkerTokenID) {
+				t.Fatalf("failed revoke receipt missing: %v", err)
+			}
+			if failRevoke {
+				var receipt *WorkerTokenRevocationError
+				if !errors.As(err, &receipt) || receipt.TenantID != testTenant || receipt.TokenID != testWorkerTokenID {
+					t.Fatalf("unusable retry receipt: %v", err)
+				}
+				failRevoke = false
+				if retryErr := service.RetryWorkerTokenRevocation(context.Background(), receipt); retryErr != nil {
+					t.Fatal(retryErr)
+				}
+				if len(revoked) != 2 || revoked[1] != "/api/v1/api-tokens/"+testWorkerTokenID {
+					t.Fatalf("retry revoked unrelated token: %v", revoked)
+				}
+			}
+			if store.row.DeletionState != "active" {
+				t.Fatal("healthy mapping changed")
+			}
+		})
+	}
+}
+
+func TestHatchetCleanupRevocationFailurePreservesCiphertextAndBackoff(t *testing.T) {
+	boundary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(500)
+		_, _ = w.Write([]byte("private diagnostics"))
+	}))
+	defer boundary.Close()
+	client, _ := NewClient(boundary.URL, boundary.Client())
+	box, _ := secretbox.New(bytes.Repeat([]byte{1}, 32))
+	store := &tenantMemory{exists: true, row: db.WorkflowHatchetTenant{TenantID: testTenant, TokenEncrypted: "preserved"}}
+	service, _ := NewTenantService(client, store, box, "email", "password")
+	now := time.Now()
+	for _, attempt := range []int32{0, 10} {
+		store.row.DeletionAttempts = attempt
+		err := service.Cleanup(context.Background(), pgtype.UUID{Valid: true}, now)
+		if err == nil || strings.Contains(err.Error(), "private") || store.row.TokenEncrypted != "preserved" || store.row.DeletionState != "failed" || store.row.DeletionError.String != "tenant_token_revocation_failed" {
+			t.Fatalf("failure receipt: %+v %v", store.row, err)
+		}
+		delay := store.row.NextDeletionAttemptAt.Time.Sub(now)
+		if (attempt == 0 && delay != 2*time.Minute) || delay <= 0 || delay > 24*time.Hour {
+			t.Fatalf("retry %v", delay)
+		}
+	}
 }
 func (m *tenantMemory) CreateWorkflowHatchetTenant(_ context.Context, p db.CreateWorkflowHatchetTenantParams) (db.WorkflowHatchetTenant, error) {
 	if m.exists {
@@ -219,7 +313,7 @@ func TestHatchetTenantProvisionRestartAndWorkerSeparation(t *testing.T) {
 			tokens++
 			name := "server-secret"
 			if tokens > 1 {
-				name = "worker-secret"
+				name = testWorkerToken
 			}
 			_ = json.NewEncoder(w).Encode(map[string]string{"token": name})
 		default:
@@ -251,7 +345,7 @@ func TestHatchetTenantProvisionRestartAndWorkerSeparation(t *testing.T) {
 		t.Fatalf("restart %v creates=%d tokens=%d", err, creates, tokens)
 	}
 	worker, err := restart.WorkerCredentials(context.Background(), workspace, "daemon-a", "1h")
-	if err != nil || worker.Token != "worker-secret" || worker.TenantID != testTenant || worker.Token == first.Token {
+	if err != nil || worker.Token != testWorkerToken || worker.TenantID != testTenant || worker.Token == first.Token {
 		t.Fatalf("worker separation: %+v %v", worker, err)
 	}
 }

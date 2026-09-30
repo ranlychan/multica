@@ -30,6 +30,9 @@ func TestHatchetConfigIsolationAndRedaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct{ key, value string }{
+		{"MULTICA_HATCHET_DATABASE_URL", "postgres://u:secret@other-cluster:5433/app"},
+		{"MULTICA_HATCHET_DATABASE_URL", "postgres://u:secret@other-cluster,localhost/app"},
+		{"MULTICA_HATCHET_DATABASE_URL", "postgres://u:secret@alias.internal/app"},
 		{"MULTICA_HATCHET_DATABASE_URL", "postgres://u:secret@127.0.0.1/app"},
 		{"MULTICA_HATCHET_API_URL", "https://public.example.com"},
 		{"MULTICA_HATCHET_GRPC_ADDRESS", "0.0.0.0:7070"},
