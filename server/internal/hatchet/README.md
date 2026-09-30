@@ -32,7 +32,7 @@ must match the tenant addressed by the request.
 | Run state | `GET /api/v1/stable/workflow-runs/{run}`, `.../{run}/status` | Details contain `run`, `tasks`, `shape`, `taskEvents`; run includes `metadata`, `status`, optional `workflowVersionId`. Status endpoint returns a JSON status string. REST states: QUEUED, RUNNING, COMPLETED, FAILED, CANCELLED. |
 | Reconciliation | `GET /api/v1/stable/tenants/{tenant}/workflow-runs` | Filters include `idempotency_keys`, `additional_metadata`, `since`, `only_tasks`, `limit`, `offset`. List reads the OLAP view; a temporarily empty result is not proof of non-submission. |
 | Logs | `GET /api/v1/stable/tasks/{task}/logs` | Bound with `limit`, `since`, `until`, `attempt`, `order_by_direction`; lines include `message`, `createdAt`, optional attempt/retry and task IDs. Workflow logs require walking its tasks. |
-| Durable event evidence | `GET /api/v1/stable/tenants/{tenant}/durable-tasks/{task}` | The probe observes a persisted SLEEP condition before crashing the worker and engine. |
+| Durable event evidence | `GET /api/v1/stable/tenants/{tenant}/durable-tasks/{task}` | After r2 registration, the probe requires r1 RUNNING and its own unsatisfied SLEEP with at least 30 seconds remaining, then SIGKILLs both worker and engine. |
 | Registered workflows | `GET /api/v1/tenants/{tenant}/workflows` | The probe waits for each immutable revision name before submission. |
 
 The exact upstream service name for durable dispatch is recorded in
@@ -47,7 +47,9 @@ hand-constructing the bidirectional durable protocol.
    a distinct immutable name per Multica revision, and bind action/worker routing
    to that revision too. Never register changed code under a historical name.
    The live probe registered r2 while r1 was sleeping, crashed its worker and
-   engine, and verified r1 completed with r1 output after restart.
+   engine, and verified r1 completed with r1 output after restart. Its 120-second
+   wait covers registration; a post-sleep completion record must be absent before
+   the crash and appear with invocation >= 2 and a timestamp after restart.
 
 2. **Idempotency:** upstream supports definition-level CEL expressions evaluated
    against input/additional metadata. Reserve an input envelope containing
@@ -121,11 +123,17 @@ HATCHET_LIVE=1 HATCHET_BIN_DIR=/absolute/pinned/bin HATCHET_PROBE_WORKER=/absolu
 
 The test creates a uniquely named disposable Postgres container and child
 processes, then removes only those resources. It does not use `.env` or existing
-services. `HATCHET_CAPTURE_DIR` may point to a fresh private output directory to
+services. Bootstrap and child processes use the disposable directory as cwd.
+A bootstrap-only OpenSSL wrapper supplies an explicit CA serial path because
+macOS LibreSSL otherwise truncates paths at a dotted ancestor; the test checks
+that serial state remains inside its certificate directory. The pinned binary
+and embedded certificate script are unchanged.
+`HATCHET_CAPTURE_DIR` may point to a fresh private output directory to
 retain diagnostics; it contains ephemeral key material, so never commit it.
 The checked-in HTTP fixture omits credentials/cookies. Its `login` and
-`ambiguous-response` entries are explicitly outcome markers; other bodies are
-real responses from the successful TLS probe.
+`ambiguous-response` entries are explicitly outcome markers; `restart-evidence`
+records harness crash/restart times and the worker's post-sleep completion.
+Other bodies are real responses from the successful TLS probe.
 
 A build target, supervisor and container integration are later tasks; this change
 does not claim they already exist.
@@ -156,5 +164,5 @@ with repository paths, one-based inclusive line ranges and whole-file hashes.
 Full files have no line range. Upstream's MIT license text is included as a
 source entry. These are schema/source fixtures. `testdata/help/` contains actual
 binary help and `testdata/live-responses.json` contains the successful probe's
-HTTP evidence, with the two outcome markers described above. No secrets or real
-tenant tokens are included.
+HTTP evidence, with the diagnostic outcome markers described above. No secrets
+or real tenant tokens are included.

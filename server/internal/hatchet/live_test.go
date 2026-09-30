@@ -68,7 +68,31 @@ func TestPinnedLiveContract(t *testing.T) {
 	l.wait("postgres", 30*time.Second, func() bool { return exec.Command("docker", "exec", name, "pg_isready", "-U", "postgres").Run() == nil })
 	l.command(env, filepath.Join(bin, "hatchet-migrate"))
 	config := filepath.Join(root, "config")
-	l.command(env, filepath.Join(bin, "hatchet-admin"), "quickstart", "--generated-config-dir", config, "--cert-dir", filepath.Join(root, "certs"), "--skip", "seed", "--overwrite=false")
+	// Quickstart makes certificate paths absolute. LibreSSL's default serial
+	// filename truncates at the first dot, including dotted ancestor directories.
+	// Keep the pinned binary/script intact and supply an explicit serial path.
+	openssl, err := exec.LookPath("openssl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shimDir := filepath.Join(root, "bootstrap-bin")
+	if err := os.MkdirAll(shimDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	const opensslShim = `#!/bin/sh
+if [ "$1" = x509 ]; then
+  exec "$MULTICA_PROBE_OPENSSL" "$@" -CAserial "$MULTICA_PROBE_CA_SERIAL"
+fi
+exec "$MULTICA_PROBE_OPENSSL" "$@"
+`
+	if err := os.WriteFile(filepath.Join(shimDir, "openssl"), []byte(opensslShim), 0700); err != nil {
+		t.Fatal(err)
+	}
+	bootstrapEnv := append(append([]string{}, env...), "PATH="+shimDir+string(os.PathListSeparator)+os.Getenv("PATH"), "MULTICA_PROBE_OPENSSL="+openssl, "MULTICA_PROBE_CA_SERIAL="+filepath.Join(root, "certs", "ca.srl"))
+	l.command(bootstrapEnv, filepath.Join(bin, "hatchet-admin"), "quickstart", "--generated-config-dir", config, "--cert-dir", filepath.Join(root, "certs"), "--skip", "seed", "--overwrite=false")
+	if _, err := os.Stat(filepath.Join(root, "certs", "ca.srl")); err != nil {
+		t.Fatalf("certificate serial state escaped disposable cert directory: %v", err)
+	}
 	l.command(env, filepath.Join(bin, "hatchet-admin"), "seed", "--config", config)
 	engine := l.start(env, "engine", filepath.Join(bin, "hatchet-engine"), "--config", config)
 	l.start(env, "api", filepath.Join(bin, "hatchet-api"), "--config", config)
@@ -99,7 +123,8 @@ func TestPinnedLiveContract(t *testing.T) {
 	l.requireStatus("tenant token cannot provision", status, 403, body)
 	l.capture("tenant-token-provisioning", status, json.RawMessage(body))
 	effects := filepath.Join(root, "effects.txt")
-	workerEnv := append(os.Environ(), "HATCHET_CLIENT_TOKEN="+tokenA, "HATCHET_CLIENT_HOST_PORT=127.0.0.1:"+grpcPort, "HATCHET_CLIENT_SERVER_URL="+l.origin, "HATCHET_CLIENT_TLS_STRATEGY=tls", "HATCHET_CLIENT_TLS_ROOT_CA_FILE="+filepath.Join(root, "certs", "ca.cert"), "PROBE_EFFECTS="+effects)
+	completionFile := filepath.Join(root, "completions.jsonl")
+	workerEnv := append(os.Environ(), "HATCHET_CLIENT_TOKEN="+tokenA, "HATCHET_CLIENT_HOST_PORT=127.0.0.1:"+grpcPort, "HATCHET_CLIENT_SERVER_URL="+l.origin, "HATCHET_CLIENT_TLS_STRATEGY=tls", "HATCHET_CLIENT_TLS_ROOT_CA_FILE="+filepath.Join(root, "certs", "ca.cert"), "PROBE_EFFECTS="+effects, "PROBE_COMPLETIONS="+completionFile)
 	worker1 := l.start(append(workerEnv, "PROBE_REVISION=r1"), "worker-r1", workerBin)
 	registered := func(rev string) {
 		l.wait("register "+rev, 45*time.Second, func() bool {
@@ -109,7 +134,7 @@ func TestPinnedLiveContract(t *testing.T) {
 	}
 	registered("r1")
 	runID := "ba5be5a3-4b5f-4cd1-9240-6f63730ab001"
-	input := map[string]any{"multica_run_id": runID, "delay": 12, "payload": map[string]any{"message": "probe"}}
+	input := map[string]any{"multica_run_id": runID, "delay": 120, "payload": map[string]any{"message": "probe"}}
 	trigger := func(rev string, input map[string]any) (int, []byte) {
 		return l.request("POST", "/api/v1/stable/tenants/"+tenantA+"/workflow-runs/trigger", map[string]any{"workflowName": "mc-contract-" + rev, "input": input, "return_only_id": true}, tokenA, nil)
 	}
@@ -197,7 +222,7 @@ func TestPinnedLiveContract(t *testing.T) {
 		}
 		taskID = result.Tasks[0].Metadata.ID
 		status, body = l.request("GET", "/api/v1/stable/tenants/"+tenantA+"/durable-tasks/"+taskID, nil, tokenA, nil)
-		if status != 200 || !bytes.Contains(body, []byte("SLEEP")) {
+		if status != 200 || !hasUnsatisfiedSleep(body, taskID, time.Now(), 30*time.Second) {
 			return false
 		}
 		l.capture("durable-wait", status, json.RawMessage(body))
@@ -207,12 +232,28 @@ func TestPinnedLiveContract(t *testing.T) {
 	// and the engine. Recovery must use r1 and must not repeat its durable memo.
 	l.start(append(workerEnv, "PROBE_REVISION=r2"), "worker-r2", workerBin)
 	registered("r2")
-	worker1.kill()
-	engine.kill()
+	status, body = getRun(engineID)
+	l.requireStatus("pre-crash run", status, 200, body)
+	if jsonString(t, body, "run", "status") != "RUNNING" {
+		t.Fatalf("target is not running immediately before crash: %s", body)
+	}
+	status, body = l.request("GET", "/api/v1/stable/tenants/"+tenantA+"/durable-tasks/"+taskID, nil, tokenA, nil)
+	l.requireStatus("pre-crash wait", status, 200, body)
+	if !hasUnsatisfiedSleep(body, taskID, time.Now(), 30*time.Second) {
+		t.Fatalf("no unsatisfied sleep with 30s margin after r2 registration: %s", body)
+	}
+	if _, err := os.Stat(completionFile); !os.IsNotExist(err) {
+		t.Fatalf("target already continued before crash (completion file: %v)", err)
+	}
+	l.capture("pre-crash-unsatisfied-sleep", status, json.RawMessage(body))
+	crashAt := time.Now().UTC()
+	worker1.crash(t)
+	engine.crash(t)
+	restartAt := time.Now().UTC()
 	engine = l.start(env, "engine-restarted", filepath.Join(bin, "hatchet-engine"), "--config", config)
 	_ = engine
 	l.start(append(workerEnv, "PROBE_REVISION=r1"), "worker-r1-restarted", workerBin)
-	l.wait("durable recovery", 150*time.Second, func() bool {
+	l.wait("durable recovery", 200*time.Second, func() bool {
 		status, body := getRun(engineID)
 		if status != 200 {
 			return false
@@ -230,6 +271,19 @@ func TestPinnedLiveContract(t *testing.T) {
 		l.capture("recovered-run", status, json.RawMessage(body))
 		return true
 	})
+	completionData, err := os.ReadFile(completionFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var completion probeCompletion
+	if err := json.Unmarshal(bytes.TrimSpace(completionData), &completion); err != nil {
+		t.Fatalf("expected one post-sleep completion: %v", err)
+	}
+	if completion.RunID != runID || completion.Revision != "r1" || completion.Invocation < 2 || !completion.ResumedAt.After(restartAt) {
+		t.Fatalf("no fresh post-restart continuation: %+v (restart %s)", completion, restartAt)
+	}
+	l.capture("restart-evidence", 0, map[string]any{"crashAt": crashAt, "restartAt": restartAt, "completion": completion})
+	t.Logf("crashed unsatisfied sleep at %s; restarted at %s; resumed invocation %d at %s", crashAt.Format(time.RFC3339Nano), restartAt.Format(time.RFC3339Nano), completion.Invocation, completion.ResumedAt.Format(time.RFC3339Nano))
 	effectData, err := os.ReadFile(effects)
 	if err != nil {
 		t.Fatal(err)
@@ -297,6 +351,86 @@ type liveProbe struct {
 	responses    map[string]json.RawMessage
 }
 
+type probeCompletion struct {
+	RunID      string    `json:"runId"`
+	Revision   string    `json:"revision"`
+	Invocation int32     `json:"invocation"`
+	ResumedAt  time.Time `json:"resumedAt"`
+}
+
+func hasUnsatisfiedSleep(body []byte, taskID string, now time.Time, minRemaining time.Duration) bool {
+	var entries []struct {
+		TaskExternalID string    `json:"taskExternalId"`
+		Kind           string    `json:"kind"`
+		IsSatisfied    *bool     `json:"isSatisfied"`
+		InsertedAt     time.Time `json:"insertedAt"`
+		WaitData       []struct {
+			Kind       string `json:"kind"`
+			DurationMS int64  `json:"sleepDurationMs"`
+		} `json:"waitData"`
+	}
+	if json.Unmarshal(body, &entries) != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.TaskExternalID != taskID || entry.Kind != "WAIT_FOR" || entry.IsSatisfied == nil || *entry.IsSatisfied {
+			continue
+		}
+		for _, condition := range entry.WaitData {
+			if condition.Kind == "SLEEP" && condition.DurationMS > 0 && entry.InsertedAt.Add(time.Duration(condition.DurationMS)*time.Millisecond).After(now.Add(minRemaining)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func TestCrashProbeRejectsSatisfiedOrExpiredSleep(t *testing.T) {
+	now := time.Date(2026, 9, 30, 1, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name, body string
+		want       bool
+	}{
+		{"unsatisfied", `[{"taskExternalId":"task-1","kind":"WAIT_FOR","isSatisfied":false,"insertedAt":"2026-09-30T00:59:50Z","waitData":[{"kind":"SLEEP","sleepDurationMs":120000}]}]`, true},
+		{"already satisfied", `[{"taskExternalId":"task-1","kind":"WAIT_FOR","isSatisfied":true,"insertedAt":"2026-09-30T00:59:50Z","waitData":[{"kind":"SLEEP","sleepDurationMs":120000}]}]`, false},
+		{"expired window", `[{"taskExternalId":"task-1","kind":"WAIT_FOR","isSatisfied":false,"insertedAt":"2026-09-30T00:59:00Z","waitData":[{"kind":"SLEEP","sleepDurationMs":12000}]}]`, false},
+		{"another task", `[{"taskExternalId":"task-2","kind":"WAIT_FOR","isSatisfied":false,"insertedAt":"2026-09-30T00:59:50Z","waitData":[{"kind":"SLEEP","sleepDurationMs":120000}]}]`, false},
+		{"missing satisfaction flag", `[{"taskExternalId":"task-1","kind":"WAIT_FOR","insertedAt":"2026-09-30T00:59:50Z","waitData":[{"kind":"SLEEP","sleepDurationMs":120000}]}]`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasUnsatisfiedSleep([]byte(tc.body), "task-1", now, 30*time.Second); got != tc.want {
+				t.Fatalf("crash-ready=%v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLiveCommandsUseDisposableWorkingDirectory(t *testing.T) {
+	root := t.TempDir()
+	p := &liveProbe{t: t, root: root}
+	t.Run("bootstrap", func(t *testing.T) {
+		out := p.command(nil, "/bin/pwd", "-P")
+		got, _ := filepath.EvalSymlinks(strings.TrimSpace(out))
+		want, _ := filepath.EvalSymlinks(root)
+		if got != want {
+			t.Fatalf("bootstrap cwd=%s, want %s", got, want)
+		}
+	})
+	t.Run("child", func(t *testing.T) {
+		child := p.start(nil, "cwd", "/bin/pwd", "-P")
+		<-child.done
+		out, err := os.ReadFile(filepath.Join(root, "cwd.log"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _ := filepath.EvalSymlinks(strings.TrimSpace(string(out)))
+		want, _ := filepath.EvalSymlinks(root)
+		if got != want {
+			t.Fatalf("child cwd=%s, want %s", got, want)
+		}
+	})
+}
+
 func TestCapturedLiveContract(t *testing.T) {
 	data, err := os.ReadFile("testdata/live-responses.json")
 	if err != nil {
@@ -330,6 +464,17 @@ func TestCapturedLiveContract(t *testing.T) {
 	if original != recovered || original == replayed {
 		t.Fatal("recovery/replay run identity contract changed")
 	}
+	var evidence struct {
+		CrashAt    time.Time       `json:"crashAt"`
+		RestartAt  time.Time       `json:"restartAt"`
+		Completion probeCompletion `json:"completion"`
+	}
+	if err := json.Unmarshal(captured["restart-evidence"].Body, &evidence); err != nil {
+		t.Fatalf("missing restart evidence: %v", err)
+	}
+	if evidence.Completion.Invocation < 2 || !evidence.Completion.ResumedAt.After(evidence.RestartAt) || evidence.RestartAt.Before(evidence.CrashAt) {
+		t.Fatal("captured completion does not prove a fresh post-restart invocation")
+	}
 }
 
 func (l *liveProbe) command(env []string, name string, args ...string) string {
@@ -337,6 +482,7 @@ func (l *liveProbe) command(env []string, name string, args ...string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = l.root
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -348,6 +494,22 @@ func (l *liveProbe) command(env []string, name string, args ...string) string {
 type liveProcess struct {
 	cmd  *exec.Cmd
 	done chan error
+}
+
+func (p *liveProcess) crash(t *testing.T) {
+	t.Helper()
+	select {
+	case <-p.done:
+		t.Fatal("target process exited before crash injection")
+	default:
+	}
+	if err := p.cmd.Process.Kill(); err != nil {
+		t.Fatalf("crash injection: %v", err)
+	}
+	<-p.done
+	if p.cmd.ProcessState == nil || p.cmd.ProcessState.Exited() {
+		t.Fatal("target was not terminated by a signal")
+	}
 }
 
 func (p *liveProcess) kill() {
@@ -366,6 +528,7 @@ func (l *liveProbe) start(env []string, label, name string, args ...string) *liv
 		l.t.Fatal(err)
 	}
 	cmd := exec.Command(name, args...)
+	cmd.Dir = l.root
 	cmd.Env = env
 	cmd.Stdout = f
 	cmd.Stderr = f

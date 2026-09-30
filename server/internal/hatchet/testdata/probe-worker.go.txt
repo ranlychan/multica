@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"log"
 	"os"
 	"time"
@@ -32,6 +33,12 @@ func main() {
 			if err!=nil{return nil,err}
 			ctx.Log("probe "+revision)
 			if _,err:=ctx.SleepFor(time.Duration(in.Delay)*time.Second);err!=nil{return nil,err}
+			completion:=map[string]any{"runId":in.RunID,"revision":revision,"invocation":ctx.InvocationCount(),"resumedAt":time.Now().UTC()}
+			f,err:=os.OpenFile(os.Getenv("PROBE_COMPLETIONS"),os.O_CREATE|os.O_WRONLY|os.O_APPEND,0600)
+			if err!=nil{return nil,err}
+			err=json.NewEncoder(f).Encode(completion)
+			closeErr:=f.Close()
+			if err!=nil{return nil,err};if closeErr!=nil{return nil,closeErr}
 			return map[string]any{"revision":revision,"multica_run_id":in.RunID,"payload":in.Payload},nil
 		},
 		hatchet.WithWorkflowIdempotency(hatchet.IdempotencyConfig{Expression:"input.multica_run_id",TTL:time.Hour}),
