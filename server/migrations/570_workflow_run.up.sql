@@ -13,11 +13,15 @@ CREATE TABLE IF NOT EXISTS workflow_run (
  CHECK (idempotency_key=id),
  CHECK (source <> 'schedule' OR (trigger_id IS NOT NULL AND planned_at IS NOT NULL)),
  CHECK ((submission_started_at IS NULL AND submission_deadline IS NULL) OR
-        (submission_started_at IS NOT NULL AND submission_deadline > submission_started_at)),
+        (submission_started_at IS NOT NULL AND submission_deadline IS NOT NULL AND submission_deadline > submission_started_at)),
+ CHECK (status NOT IN ('submitting','running') OR (submission_started_at IS NOT NULL AND submission_deadline IS NOT NULL)),
  CHECK (status <> 'skipped' OR reason_code IS NOT NULL)
 );
 CREATE FUNCTION workflow_run_guard() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
+ IF OLD.status IN ('completed','failed','cancelled','skipped') AND NEW IS DISTINCT FROM OLD THEN
+  RAISE EXCEPTION 'terminal workflow run is immutable';
+ END IF;
  IF ROW(NEW.workspace_id,NEW.workflow_id,NEW.revision_id,NEW.definition_hash,NEW.principal_user_id,NEW.trigger_id,NEW.source,NEW.planned_at,NEW.idempotency_key,NEW.input)
  IS DISTINCT FROM ROW(OLD.workspace_id,OLD.workflow_id,OLD.revision_id,OLD.definition_hash,OLD.principal_user_id,OLD.trigger_id,OLD.source,OLD.planned_at,OLD.idempotency_key,OLD.input) THEN
  RAISE EXCEPTION 'workflow run admission snapshot is immutable';

@@ -69,13 +69,15 @@ SELECT * FROM workflow_run WHERE workflow_id=$1 AND workspace_id=$2 ORDER BY tri
 SELECT * FROM workflow_run WHERE workspace_id=$1 AND status IN ('queued','submitting','running') ORDER BY triggered_at LIMIT $2;
 -- name: BeginWorkflowRunSubmission :one
 UPDATE workflow_run SET status='submitting',submission_started_at=$3,submission_deadline=$4
-WHERE id=$1 AND workspace_id=$2 AND status='queued' AND submission_started_at IS NULL RETURNING *;
+WHERE id=$1 AND workspace_id=$2 AND status='queued' AND submission_started_at IS NULL
+AND $3::timestamptz IS NOT NULL AND $4::timestamptz IS NOT NULL AND $4::timestamptz>$3::timestamptz RETURNING *;
 -- name: AcknowledgeWorkflowRun :one
 UPDATE workflow_run SET status='running',hatchet_run_id=$3,started_at=now()
 WHERE id=$1 AND workspace_id=$2 AND status='submitting' RETURNING *;
 -- name: FinishWorkflowRunCAS :one
 UPDATE workflow_run SET status=$3,output=$4,reason_code=$5,failure_reason=$6,finished_at=now()
-WHERE id=$1 AND workspace_id=$2 AND status=$7 RETURNING *;
+WHERE id=$1 AND workspace_id=$2 AND status=$7 AND status IN ('queued','submitting','running')
+AND $3::text IN ('completed','failed','cancelled','skipped') RETURNING *;
 -- name: CreateWorkflowRunnerToken :one
 INSERT INTO workflow_runner_token(workspace_id,daemon_id,token_hash,label,created_by_id,expires_at)
 VALUES($1,$2,$3,$4,$5,$6) RETURNING *;
@@ -105,10 +107,12 @@ UPDATE workflow_hatchet_tenant SET deletion_state='deleting',deletion_attempts=d
 WHERE workspace_id=$1 AND deletion_state IN ('pending','failed','deleting') AND next_deletion_attempt_at<=now() RETURNING *;
 -- name: ListWorkflowHatchetTenantDeletions :many
 SELECT * FROM workflow_hatchet_tenant WHERE deletion_state IN ('pending','failed','deleting') AND next_deletion_attempt_at<=now() ORDER BY next_deletion_attempt_at LIMIT $1;
--- name: FinishWorkflowHatchetTenantDeletion :exec
+-- name: FinishWorkflowHatchetTenantDeletion :one
 UPDATE workflow_hatchet_tenant SET deletion_state=$2,deletion_error=$3,next_deletion_attempt_at=$4,
 deleted_at=CASE WHEN $2::text='deleted' THEN now() ELSE NULL END,updated_at=now()
-WHERE workspace_id=$1 AND deletion_state='deleting';
+WHERE workspace_id=$1 AND deletion_state='deleting' AND deletion_attempts=sqlc.arg('expected_attempt')
+AND next_deletion_attempt_at>now() AND $2::text IN ('failed','deleted')
+AND ($2::text='deleted' OR $4::timestamptz IS NOT NULL) RETURNING *;
 -- name: CreateWorkflowOperation :one
 INSERT INTO workflow_operation(workspace_id,run_id,step_id,operation_key,operation_name,payload_hash,attempt)
 VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(workspace_id,run_id,step_id,operation_key) DO NOTHING RETURNING *;

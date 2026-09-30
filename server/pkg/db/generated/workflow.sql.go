@@ -138,7 +138,8 @@ func (q *Queries) AdvanceWorkflowTriggerCAS(ctx context.Context, arg AdvanceWork
 
 const beginWorkflowRunSubmission = `-- name: BeginWorkflowRunSubmission :one
 UPDATE workflow_run SET status='submitting',submission_started_at=$3,submission_deadline=$4
-WHERE id=$1 AND workspace_id=$2 AND status='queued' AND submission_started_at IS NULL RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at
+WHERE id=$1 AND workspace_id=$2 AND status='queued' AND submission_started_at IS NULL
+AND $3::timestamptz IS NOT NULL AND $4::timestamptz IS NOT NULL AND $4::timestamptz>$3::timestamptz RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at
 `
 
 type BeginWorkflowRunSubmissionParams struct {
@@ -752,10 +753,12 @@ func (q *Queries) FailWorkflowOperation(ctx context.Context, arg FailWorkflowOpe
 	return i, err
 }
 
-const finishWorkflowHatchetTenantDeletion = `-- name: FinishWorkflowHatchetTenantDeletion :exec
+const finishWorkflowHatchetTenantDeletion = `-- name: FinishWorkflowHatchetTenantDeletion :one
 UPDATE workflow_hatchet_tenant SET deletion_state=$2,deletion_error=$3,next_deletion_attempt_at=$4,
 deleted_at=CASE WHEN $2::text='deleted' THEN now() ELSE NULL END,updated_at=now()
-WHERE workspace_id=$1 AND deletion_state='deleting'
+WHERE workspace_id=$1 AND deletion_state='deleting' AND deletion_attempts=$5
+AND next_deletion_attempt_at>now() AND $2::text IN ('failed','deleted')
+AND ($2::text='deleted' OR $4::timestamptz IS NOT NULL) RETURNING workspace_id, tenant_id, token_encrypted, deletion_state, deletion_requested_at, deletion_attempts, next_deletion_attempt_at, deletion_error, deleted_at, created_at, updated_at
 `
 
 type FinishWorkflowHatchetTenantDeletionParams struct {
@@ -763,21 +766,38 @@ type FinishWorkflowHatchetTenantDeletionParams struct {
 	DeletionState         string             `json:"deletion_state"`
 	DeletionError         pgtype.Text        `json:"deletion_error"`
 	NextDeletionAttemptAt pgtype.Timestamptz `json:"next_deletion_attempt_at"`
+	ExpectedAttempt       int32              `json:"expected_attempt"`
 }
 
-func (q *Queries) FinishWorkflowHatchetTenantDeletion(ctx context.Context, arg FinishWorkflowHatchetTenantDeletionParams) error {
-	_, err := q.db.Exec(ctx, finishWorkflowHatchetTenantDeletion,
+func (q *Queries) FinishWorkflowHatchetTenantDeletion(ctx context.Context, arg FinishWorkflowHatchetTenantDeletionParams) (WorkflowHatchetTenant, error) {
+	row := q.db.QueryRow(ctx, finishWorkflowHatchetTenantDeletion,
 		arg.WorkspaceID,
 		arg.DeletionState,
 		arg.DeletionError,
 		arg.NextDeletionAttemptAt,
+		arg.ExpectedAttempt,
 	)
-	return err
+	var i WorkflowHatchetTenant
+	err := row.Scan(
+		&i.WorkspaceID,
+		&i.TenantID,
+		&i.TokenEncrypted,
+		&i.DeletionState,
+		&i.DeletionRequestedAt,
+		&i.DeletionAttempts,
+		&i.NextDeletionAttemptAt,
+		&i.DeletionError,
+		&i.DeletedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const finishWorkflowRunCAS = `-- name: FinishWorkflowRunCAS :one
 UPDATE workflow_run SET status=$3,output=$4,reason_code=$5,failure_reason=$6,finished_at=now()
-WHERE id=$1 AND workspace_id=$2 AND status=$7 RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at
+WHERE id=$1 AND workspace_id=$2 AND status=$7 AND status IN ('queued','submitting','running')
+AND $3::text IN ('completed','failed','cancelled','skipped') RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at
 `
 
 type FinishWorkflowRunCASParams struct {
