@@ -2,6 +2,25 @@
 -- bottom-up deletion plan; the legacy foreign keys remain only as a
 -- compatibility safety net during the expand phase.
 
+-- Workflow teardown runs after QueueWorkflowHatchetTenantDeletion in the same
+-- transaction. Keep the FK-free tenant tombstone until engine cleanup finishes.
+-- These queries do not delete agent tasks: ordinary workspace task ownership
+-- and issue cleanup below remain authoritative, including historical run links.
+-- name: DeleteWorkflowOperationsByWorkspace :exec
+DELETE FROM workflow_operation WHERE workspace_id=$1;
+-- name: DeleteWorkflowRunsByWorkspace :exec
+DELETE FROM workflow_run WHERE workspace_id=$1;
+-- name: DeleteWorkflowTriggersByWorkspace :exec
+DELETE FROM workflow_trigger WHERE workspace_id=$1;
+-- name: DeleteWorkflowCollaboratorsByWorkspace :exec
+DELETE FROM workflow_collaborator WHERE workspace_id=$1;
+-- name: DeleteWorkflowRevisionsByWorkspace :exec
+DELETE FROM workflow_revision WHERE workspace_id=$1;
+-- name: DeleteWorkflowRunnerTokensByWorkspace :exec
+DELETE FROM workflow_runner_token WHERE workspace_id=$1;
+-- name: DeleteWorkflowsByWorkspace :exec
+DELETE FROM workflow WHERE workspace_id=$1;
+
 -- name: SetWorkspaceTeardownMode :exec
 -- The setting is transaction-local. Migration 242 makes only the three DELETE
 -- dirty triggers skip their per-row work while this flag is on.

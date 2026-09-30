@@ -633,52 +633,6 @@ func (q *Queries) DeleteWorkflowCollaborator(ctx context.Context, arg DeleteWork
 	return err
 }
 
-const deleteWorkflowCollaboratorsByWorkspace = `-- name: DeleteWorkflowCollaboratorsByWorkspace :exec
-DELETE FROM workflow_collaborator WHERE workspace_id=$1
-`
-
-func (q *Queries) DeleteWorkflowCollaboratorsByWorkspace(ctx context.Context, workspaceID pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, deleteWorkflowCollaboratorsByWorkspace, workspaceID)
-	return err
-}
-
-const deleteWorkflowOperationsByWorkspace = `-- name: DeleteWorkflowOperationsByWorkspace :exec
-DELETE FROM workflow_operation WHERE workspace_id=$1
-`
-
-// Cleanup runs in the caller's workspace deletion transaction. Task rows intentionally survive.
-func (q *Queries) DeleteWorkflowOperationsByWorkspace(ctx context.Context, workspaceID pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, deleteWorkflowOperationsByWorkspace, workspaceID)
-	return err
-}
-
-const deleteWorkflowRevisionsByWorkspace = `-- name: DeleteWorkflowRevisionsByWorkspace :exec
-DELETE FROM workflow_revision WHERE workspace_id=$1
-`
-
-func (q *Queries) DeleteWorkflowRevisionsByWorkspace(ctx context.Context, workspaceID pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, deleteWorkflowRevisionsByWorkspace, workspaceID)
-	return err
-}
-
-const deleteWorkflowRunnerTokensByWorkspace = `-- name: DeleteWorkflowRunnerTokensByWorkspace :exec
-DELETE FROM workflow_runner_token WHERE workspace_id=$1
-`
-
-func (q *Queries) DeleteWorkflowRunnerTokensByWorkspace(ctx context.Context, workspaceID pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, deleteWorkflowRunnerTokensByWorkspace, workspaceID)
-	return err
-}
-
-const deleteWorkflowRunsByWorkspace = `-- name: DeleteWorkflowRunsByWorkspace :exec
-DELETE FROM workflow_run WHERE workspace_id=$1
-`
-
-func (q *Queries) DeleteWorkflowRunsByWorkspace(ctx context.Context, workspaceID pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, deleteWorkflowRunsByWorkspace, workspaceID)
-	return err
-}
-
 const deleteWorkflowTrigger = `-- name: DeleteWorkflowTrigger :exec
 DELETE FROM workflow_trigger WHERE id=$1 AND workspace_id=$2
 `
@@ -690,24 +644,6 @@ type DeleteWorkflowTriggerParams struct {
 
 func (q *Queries) DeleteWorkflowTrigger(ctx context.Context, arg DeleteWorkflowTriggerParams) error {
 	_, err := q.db.Exec(ctx, deleteWorkflowTrigger, arg.ID, arg.WorkspaceID)
-	return err
-}
-
-const deleteWorkflowTriggersByWorkspace = `-- name: DeleteWorkflowTriggersByWorkspace :exec
-DELETE FROM workflow_trigger WHERE workspace_id=$1
-`
-
-func (q *Queries) DeleteWorkflowTriggersByWorkspace(ctx context.Context, workspaceID pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, deleteWorkflowTriggersByWorkspace, workspaceID)
-	return err
-}
-
-const deleteWorkflowsByWorkspace = `-- name: DeleteWorkflowsByWorkspace :exec
-DELETE FROM workflow WHERE workspace_id=$1
-`
-
-func (q *Queries) DeleteWorkflowsByWorkspace(ctx context.Context, workspaceID pgtype.UUID) error {
-	_, err := q.db.Exec(ctx, deleteWorkflowsByWorkspace, workspaceID)
 	return err
 }
 

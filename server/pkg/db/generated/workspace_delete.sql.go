@@ -70,6 +70,77 @@ func (q *Queries) DeleteTaskTokensByAgent(ctx context.Context, agentID pgtype.UU
 	return err
 }
 
+const deleteWorkflowCollaboratorsByWorkspace = `-- name: DeleteWorkflowCollaboratorsByWorkspace :exec
+DELETE FROM workflow_collaborator WHERE workspace_id=$1
+`
+
+func (q *Queries) DeleteWorkflowCollaboratorsByWorkspace(ctx context.Context, workspaceID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteWorkflowCollaboratorsByWorkspace, workspaceID)
+	return err
+}
+
+const deleteWorkflowOperationsByWorkspace = `-- name: DeleteWorkflowOperationsByWorkspace :exec
+
+DELETE FROM workflow_operation WHERE workspace_id=$1
+`
+
+// Workspace deletion is application-owned. These statements form a fixed,
+// bottom-up deletion plan; the legacy foreign keys remain only as a
+// compatibility safety net during the expand phase.
+// Workflow teardown runs after QueueWorkflowHatchetTenantDeletion in the same
+// transaction. Keep the FK-free tenant tombstone until engine cleanup finishes.
+// These queries do not delete agent tasks: ordinary workspace task ownership
+// and issue cleanup below remain authoritative, including historical run links.
+func (q *Queries) DeleteWorkflowOperationsByWorkspace(ctx context.Context, workspaceID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteWorkflowOperationsByWorkspace, workspaceID)
+	return err
+}
+
+const deleteWorkflowRevisionsByWorkspace = `-- name: DeleteWorkflowRevisionsByWorkspace :exec
+DELETE FROM workflow_revision WHERE workspace_id=$1
+`
+
+func (q *Queries) DeleteWorkflowRevisionsByWorkspace(ctx context.Context, workspaceID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteWorkflowRevisionsByWorkspace, workspaceID)
+	return err
+}
+
+const deleteWorkflowRunnerTokensByWorkspace = `-- name: DeleteWorkflowRunnerTokensByWorkspace :exec
+DELETE FROM workflow_runner_token WHERE workspace_id=$1
+`
+
+func (q *Queries) DeleteWorkflowRunnerTokensByWorkspace(ctx context.Context, workspaceID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteWorkflowRunnerTokensByWorkspace, workspaceID)
+	return err
+}
+
+const deleteWorkflowRunsByWorkspace = `-- name: DeleteWorkflowRunsByWorkspace :exec
+DELETE FROM workflow_run WHERE workspace_id=$1
+`
+
+func (q *Queries) DeleteWorkflowRunsByWorkspace(ctx context.Context, workspaceID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteWorkflowRunsByWorkspace, workspaceID)
+	return err
+}
+
+const deleteWorkflowTriggersByWorkspace = `-- name: DeleteWorkflowTriggersByWorkspace :exec
+DELETE FROM workflow_trigger WHERE workspace_id=$1
+`
+
+func (q *Queries) DeleteWorkflowTriggersByWorkspace(ctx context.Context, workspaceID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteWorkflowTriggersByWorkspace, workspaceID)
+	return err
+}
+
+const deleteWorkflowsByWorkspace = `-- name: DeleteWorkflowsByWorkspace :exec
+DELETE FROM workflow WHERE workspace_id=$1
+`
+
+func (q *Queries) DeleteWorkflowsByWorkspace(ctx context.Context, workspaceID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteWorkflowsByWorkspace, workspaceID)
+	return err
+}
+
 const deleteWorkspaceAdministration = `-- name: DeleteWorkspaceAdministration :exec
 WITH
 deleted_members AS (
@@ -1193,13 +1264,9 @@ func (q *Queries) PrepareWorkspaceDeletionLinks(ctx context.Context, workspaceID
 }
 
 const setWorkspaceTeardownMode = `-- name: SetWorkspaceTeardownMode :exec
-
 SELECT set_config('multica.workspace_teardown', 'on', true)
 `
 
-// Workspace deletion is application-owned. These statements form a fixed,
-// bottom-up deletion plan; the legacy foreign keys remain only as a
-// compatibility safety net during the expand phase.
 // The setting is transaction-local. Migration 242 makes only the three DELETE
 // dirty triggers skip their per-row work while this flag is on.
 func (q *Queries) SetWorkspaceTeardownMode(ctx context.Context) error {

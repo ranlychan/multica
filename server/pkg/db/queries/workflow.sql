@@ -126,18 +126,3 @@ WHERE workspace_id=$1 AND run_id=$2 AND step_id=$3 AND operation_key=$4 AND payl
 -- name: FailWorkflowOperation :one
 UPDATE workflow_operation SET status='failed',error_code=$5,completed_at=now()
 WHERE workspace_id=$1 AND run_id=$2 AND step_id=$3 AND operation_key=$4 AND payload_hash=$6 AND status='pending' RETURNING *;
--- Cleanup runs in the caller's workspace deletion transaction. Task rows intentionally survive.
--- name: DeleteWorkflowOperationsByWorkspace :exec
-DELETE FROM workflow_operation WHERE workspace_id=$1;
--- name: DeleteWorkflowRunsByWorkspace :exec
-DELETE FROM workflow_run WHERE workspace_id=$1;
--- name: DeleteWorkflowTriggersByWorkspace :exec
-DELETE FROM workflow_trigger WHERE workspace_id=$1;
--- name: DeleteWorkflowCollaboratorsByWorkspace :exec
-DELETE FROM workflow_collaborator WHERE workspace_id=$1;
--- name: DeleteWorkflowRevisionsByWorkspace :exec
-DELETE FROM workflow_revision WHERE workspace_id=$1;
--- name: DeleteWorkflowRunnerTokensByWorkspace :exec
-DELETE FROM workflow_runner_token WHERE workspace_id=$1;
--- name: DeleteWorkflowsByWorkspace :exec
-DELETE FROM workflow WHERE workspace_id=$1;

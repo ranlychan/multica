@@ -1172,6 +1172,40 @@ func (h *Handler) DeleteWorkspace(w http.ResponseWriter, r *http.Request) {
 			run:  func() error { return qtx.SetWorkspaceTeardownMode(ctx) },
 		},
 		{
+			// Retain the tenant identity and encrypted credential for the async
+			// engine cleanup worker. No engine request belongs in this transaction.
+			name: "queue workflow tenant deletion",
+			run:  func() error { return qtx.QueueWorkflowHatchetTenantDeletion(ctx, requester.WorkspaceID) },
+		},
+		{
+			name: "delete workflow operations",
+			run:  func() error { return qtx.DeleteWorkflowOperationsByWorkspace(ctx, requester.WorkspaceID) },
+		},
+		{
+			name: "delete workflow runs",
+			run:  func() error { return qtx.DeleteWorkflowRunsByWorkspace(ctx, requester.WorkspaceID) },
+		},
+		{
+			name: "delete workflow triggers",
+			run:  func() error { return qtx.DeleteWorkflowTriggersByWorkspace(ctx, requester.WorkspaceID) },
+		},
+		{
+			name: "delete workflow collaborators",
+			run:  func() error { return qtx.DeleteWorkflowCollaboratorsByWorkspace(ctx, requester.WorkspaceID) },
+		},
+		{
+			name: "delete workflow revisions",
+			run:  func() error { return qtx.DeleteWorkflowRevisionsByWorkspace(ctx, requester.WorkspaceID) },
+		},
+		{
+			name: "delete workflow runner tokens",
+			run:  func() error { return qtx.DeleteWorkflowRunnerTokensByWorkspace(ctx, requester.WorkspaceID) },
+		},
+		{
+			name: "delete workflows",
+			run:  func() error { return qtx.DeleteWorkflowsByWorkspace(ctx, requester.WorkspaceID) },
+		},
+		{
 			// Fences task enqueue / reassignment for the rest of the
 			// transaction. Must run before anything sweeps tasks — see
 			// lockWorkspaceTaskOwners.
