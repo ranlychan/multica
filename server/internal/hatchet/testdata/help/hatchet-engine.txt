@@ -1,0 +1,10 @@
+hatchet-engine runs the Hatchet engine.
+
+Usage:
+  hatchet-engine [flags]
+
+Flags:
+      --config string          The path the config folder.
+  -h, --help                   help for hatchet-engine
+      --no-graceful-shutdown   Whether not to shut down gracefully (useful for nodemon/air).
+      --version                print version and exit.

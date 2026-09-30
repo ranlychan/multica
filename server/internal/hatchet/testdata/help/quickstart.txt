@@ -1,0 +1,15 @@
+Command used to setup a Hatchet instance
+
+Usage:
+  hatchet-admin quickstart [flags]
+
+Flags:
+      --cert-dir string               path to the directory where certificates should be stored (default "./certs")
+      --generated-config-dir string   path to the directory where the generated config should be written (default "./generated")
+  -h, --help                          help for quickstart
+      --overwrite                     whether generated files should be overwritten, if they exist (default true)
+      --skip stringArray              a list of steps to skip. possible values are "certs", "keys", or "seed"
+
+Global Flags:
+      --config string   The path the config folder.
+      --version         print version and exit.

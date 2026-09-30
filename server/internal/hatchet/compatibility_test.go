@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -86,15 +87,18 @@ func TestPinnedCompatibility(t *testing.T) {
 			return true
 		})
 		for handler, want := range map[string]string{
-			"TenantCreate":           "POST /api/v1/tenants",
-			"ApiTokenCreate":         "POST /api/v1/tenants/:tenant/api-tokens",
-			"V1WorkflowRunCreate":    "POST /api/v1/stable/tenants/:tenant/workflow-runs/trigger",
-			"V1WorkflowRunList":      "GET /api/v1/stable/tenants/:tenant/workflow-runs",
-			"V1WorkflowRunGet":       "GET /api/v1/stable/workflow-runs/:v1-workflow-run",
-			"V1WorkflowRunGetStatus": "GET /api/v1/stable/workflow-runs/:v1-workflow-run/status",
-			"V1TaskCancel":           "POST /api/v1/stable/tenants/:tenant/tasks/cancel",
-			"V1TaskReplay":           "POST /api/v1/stable/tenants/:tenant/tasks/replay",
-			"V1LogLineList":          "GET /api/v1/stable/tasks/:task/logs",
+			"UserUpdateLogin":           "POST /api/v1/users/login",
+			"TenantCreate":              "POST /api/v1/tenants",
+			"WorkflowList":              "GET /api/v1/tenants/:tenant/workflows",
+			"V1DurableTaskEventLogList": "GET /api/v1/stable/tenants/:tenant/durable-tasks/:durable-task",
+			"ApiTokenCreate":            "POST /api/v1/tenants/:tenant/api-tokens",
+			"V1WorkflowRunCreate":       "POST /api/v1/stable/tenants/:tenant/workflow-runs/trigger",
+			"V1WorkflowRunList":         "GET /api/v1/stable/tenants/:tenant/workflow-runs",
+			"V1WorkflowRunGet":          "GET /api/v1/stable/workflow-runs/:v1-workflow-run",
+			"V1WorkflowRunGetStatus":    "GET /api/v1/stable/workflow-runs/:v1-workflow-run/status",
+			"V1TaskCancel":              "POST /api/v1/stable/tenants/:tenant/tasks/cancel",
+			"V1TaskReplay":              "POST /api/v1/stable/tenants/:tenant/tasks/replay",
+			"V1LogLineList":             "GET /api/v1/stable/tasks/:task/logs",
 		} {
 			if got[handler] != want {
 				t.Errorf("%s: got %q, want %q", handler, got[handler], want)
@@ -129,6 +133,19 @@ func TestPinnedCompatibility(t *testing.T) {
 		}
 		if !slices.Equal(BinaryNames, []string{"hatchet-admin", "hatchet-migrate", "hatchet-api", "hatchet-engine"}) {
 			t.Fatalf("unsupported binaries: %v", BinaryNames)
+		}
+	})
+	t.Run("captured_binary_help", func(t *testing.T) {
+		for name, flags := range requiredFlags() {
+			data, err := os.ReadFile(filepath.Join("testdata", "help", name+".txt"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, flag := range flags {
+				if !hasHelpFlag(string(data), flag) {
+					t.Errorf("captured %s help missing --%s", name, flag)
+				}
+			}
 		}
 	})
 	t.Run("reconciliation_logs_and_state", func(t *testing.T) {
@@ -247,12 +264,35 @@ func TestPinnedCompatibility(t *testing.T) {
 			}
 			out := command(t, "", filepath.Join(dir, binary), args...)
 			for _, flag := range flags {
-				if !strings.Contains(out, "--"+flag) {
+				if !hasHelpFlag(out, flag) {
 					t.Errorf("%s help missing --%s", name, flag)
 				}
 			}
 		}
 	})
+}
+
+func TestHelpFlagRequiresCompleteOptionName(t *testing.T) {
+	for _, tc := range []struct {
+		name, help, flag string
+		want             bool
+	}{
+		{"longer option is not a match", "      --up-to-penultimate   migrate to penultimate version\n", "up-to", false},
+		{"exact option", "      --up-to string   migrate to a version\n", "up-to", true},
+		{"short alias", "  -e, --expiresIn duration   token expiration\n", "expiresIn", true},
+		{"description is not a flag", "      --other string   replaces --up-to\n", "up-to", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasHelpFlag(tc.help, tc.flag); got != tc.want {
+				t.Fatalf("hasHelpFlag(%q, %q) = %v, want %v", tc.help, tc.flag, got, tc.want)
+			}
+		})
+	}
+}
+
+func hasHelpFlag(help, flag string) bool {
+	pattern := `(?m)^[ \t]+(?:-[[:alnum:]],\s+)?--` + regexp.QuoteMeta(flag) + `(?:[ \t=]|$)`
+	return regexp.MustCompile(pattern).MatchString(help)
 }
 
 func requiredFlags() map[string][]string {

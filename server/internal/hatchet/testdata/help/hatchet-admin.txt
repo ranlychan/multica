@@ -1,0 +1,22 @@
+hatchet-admin performs administrative tasks for a Hatchet instance.
+
+Usage:
+  hatchet-admin [flags]
+  hatchet-admin [command]
+
+Available Commands:
+  completion   Generate the autocompletion script for the specified shell
+  help         Help about any command
+  k8s          Commands used to setup a Hatchet instance on Kubernetes
+  keyset       command for managing keysets.
+  quickstart   Command used to setup a Hatchet instance
+  seed         seed create initial data in the database.
+  seed-cypress seed-cypress create initial data in the database for cypress.
+  token        command for generating tokens.
+
+Flags:
+      --config string   The path the config folder.
+  -h, --help            help for hatchet-admin
+      --version         print version and exit.
+
+Use "hatchet-admin [command] --help" for more information about a command.

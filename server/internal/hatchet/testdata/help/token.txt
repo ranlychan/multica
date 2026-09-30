@@ -1,0 +1,14 @@
+create a new API token.
+
+Usage:
+  hatchet-admin token create [flags]
+
+Flags:
+  -e, --expiresIn duration   Expiration duration for the API token (default 2160h0m0s)
+  -h, --help                 help for create
+      --name string          the name of the token (default "default")
+      --tenant-id string     the tenant ID to associate with the token
+
+Global Flags:
+      --config string   The path the config folder.
+      --version         print version and exit.

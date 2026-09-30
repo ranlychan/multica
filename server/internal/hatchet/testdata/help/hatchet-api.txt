@@ -1,0 +1,9 @@
+hatchet-api runs a Hatchet instance.
+
+Usage:
+  hatchet-api [flags]
+
+Flags:
+      --config string   The path the config folder.
+  -h, --help            help for hatchet-api
+      --version         print version and exit.

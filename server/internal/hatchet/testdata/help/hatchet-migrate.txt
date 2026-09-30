@@ -1,0 +1,11 @@
+hatchet-migrate runs database migrations for Hatchet.
+
+Usage:
+  hatchet-migrate [flags]
+
+Flags:
+      --down string         migrate down to a specific version (e.g., 20240115180414).
+  -h, --help                help for hatchet-migrate
+      --up-to string        migrate up to a specific goose version (e.g., 20260818184000).
+      --up-to-penultimate   migrate up to the second-to-last migration version.
+      --version             print version and exit.
