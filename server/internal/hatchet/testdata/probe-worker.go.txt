@@ -1,0 +1,44 @@
+// Build this file inside a disposable checkout of the exact pinned Hatchet source.
+// It exercises the public Go SDK without adding Hatchet dependencies to Multica.
+package main
+
+import (
+	"log"
+	"os"
+	"time"
+	"github.com/hatchet-dev/hatchet/pkg/cmdutils"
+	hatchet "github.com/hatchet-dev/hatchet/sdks/go"
+)
+
+type input struct {
+	RunID string `json:"multica_run_id"`
+	Delay int `json:"delay"`
+	Payload map[string]any `json:"payload"`
+}
+
+func main() {
+	revision := os.Getenv("PROBE_REVISION")
+	if revision != "r1" && revision != "r2" { log.Fatal("expected PROBE_REVISION=r1 or r2") }
+	client, err := hatchet.NewClient()
+	if err != nil { log.Fatal(err) }
+	task := client.NewStandaloneDurableTask("mc-contract-"+revision,
+		func(ctx hatchet.DurableContext, in input) (map[string]any,error) {
+			_,err:=ctx.Memo("external-effect",func()(any,error){
+				f,err:=os.OpenFile(os.Getenv("PROBE_EFFECTS"),os.O_CREATE|os.O_WRONLY|os.O_APPEND,0600)
+				if err!=nil{return nil,err};defer f.Close()
+				if _,err:=f.WriteString(in.RunID+" "+revision+"\n");err!=nil{return nil,err}
+				return "recorded",nil
+			})
+			if err!=nil{return nil,err}
+			ctx.Log("probe "+revision)
+			if _,err:=ctx.SleepFor(time.Duration(in.Delay)*time.Second);err!=nil{return nil,err}
+			return map[string]any{"revision":revision,"multica_run_id":in.RunID,"payload":in.Payload},nil
+		},
+		hatchet.WithWorkflowIdempotency(hatchet.IdempotencyConfig{Expression:"input.multica_run_id",TTL:time.Hour}),
+		hatchet.WithExecutionTimeout(5*time.Minute),
+	)
+	worker,err:=client.NewWorker("mc-probe-"+revision,hatchet.WithWorkflows(task),hatchet.WithDurableSlots(5))
+	if err!=nil{log.Fatal(err)}
+	ctx,cancel:=cmdutils.NewInterruptContext();defer cancel()
+	if err:=worker.StartBlocking(ctx);err!=nil{log.Fatal(err)}
+}

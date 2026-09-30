@@ -1,0 +1,643 @@
+{
+  "ambiguous-response": {
+    "body": {
+      "connection_closed_after_accept": true
+    },
+    "status": 0
+  },
+  "cancel-0": {
+    "body": {
+      "ids": [
+        "8c1b0bb6-18e0-4ce2-b008-c12f7faada1f"
+      ]
+    },
+    "status": 200
+  },
+  "cancel-1": {
+    "body": {
+      "ids": [
+        "8c1b0bb6-18e0-4ce2-b008-c12f7faada1f"
+      ]
+    },
+    "status": 200
+  },
+  "cancelled-run": {
+    "body": {
+      "run": {
+        "additionalMetadata": {
+          "traceparent": "00-f69c848b2081bdb931a7741a7a187cf2-c34682d683dee7ce-01"
+        },
+        "createdAt": "2026-09-30T09:17:06.261676+08:00",
+        "displayName": "mc-contract-r2-1790731026226",
+        "duration": 41,
+        "errorMessage": "",
+        "finishedAt": "2026-09-30T09:17:06.302701+08:00",
+        "input": {
+          "input": {
+            "delay": 90,
+            "multica_run_id": "ba5be5a3-4b5f-4cd1-9240-6f63730ab003",
+            "payload": {
+              "message": "probe"
+            }
+          },
+          "overrides": null,
+          "parents": {},
+          "triggered_by": "manual",
+          "triggers": {
+            "filter_payload": null
+          },
+          "user_data": null
+        },
+        "metadata": {
+          "createdAt": "2026-09-30T09:17:06.223106+08:00",
+          "id": "8c1b0bb6-18e0-4ce2-b008-c12f7faada1f",
+          "updatedAt": "2026-09-30T09:17:06.223106+08:00"
+        },
+        "output": {},
+        "startedAt": "2026-09-30T09:17:06.261676+08:00",
+        "status": "CANCELLED",
+        "tenantId": "47d98f08-2351-403a-b710-5bc3cf056edc",
+        "workflowId": "d6a20eb1-2c9c-4061-976b-3816f8247409",
+        "workflowVersionId": "83f8d6e6-bbcb-4d00-a2e5-8dbbc558ca59"
+      },
+      "shape": [
+        {
+          "childrenStepIds": [],
+          "stepId": "a6a8bf57-14b4-4ab1-a0b4-255e2b20a780",
+          "taskExternalId": "8c1b0bb6-18e0-4ce2-b008-c12f7faada1f",
+          "taskName": "mc-contract-r2"
+        }
+      ],
+      "taskEvents": [],
+      "tasks": [
+        {
+          "actionId": "mc-contract-r2:mc-contract-r2",
+          "additionalMetadata": {
+            "traceparent": "00-f69c848b2081bdb931a7741a7a187cf2-c34682d683dee7ce-01"
+          },
+          "attempt": 1,
+          "createdAt": "2026-09-30T09:17:06.223106+08:00",
+          "displayName": "mc-contract-r2-1790731026226",
+          "duration": 60,
+          "errorMessage": "",
+          "finishedAt": "2026-09-30T09:17:06.30124+08:00",
+          "input": {
+            "input": {
+              "delay": 90,
+              "multica_run_id": "ba5be5a3-4b5f-4cd1-9240-6f63730ab003",
+              "payload": {
+                "message": "probe"
+              }
+            },
+            "overrides": null,
+            "parents": {},
+            "triggered_by": "manual",
+            "triggers": {
+              "filter_payload": null
+            },
+            "user_data": null
+          },
+          "isDurable": true,
+          "isEvicted": false,
+          "metadata": {
+            "createdAt": "2026-09-30T09:17:06.223106+08:00",
+            "id": "8c1b0bb6-18e0-4ce2-b008-c12f7faada1f",
+            "updatedAt": "2026-09-30T09:17:06.223106+08:00"
+          },
+          "numSpawnedChildren": 0,
+          "output": {},
+          "retryCount": 0,
+          "startedAt": "2026-09-30T09:17:06.240832+08:00",
+          "status": "CANCELLED",
+          "stepId": "a6a8bf57-14b4-4ab1-a0b4-255e2b20a780",
+          "taskExternalId": "8c1b0bb6-18e0-4ce2-b008-c12f7faada1f",
+          "taskId": 3,
+          "taskInsertedAt": "2026-09-30T09:17:06.223106+08:00",
+          "tenantId": "47d98f08-2351-403a-b710-5bc3cf056edc",
+          "type": "TASK",
+          "workflowId": "d6a20eb1-2c9c-4061-976b-3816f8247409",
+          "workflowRunExternalId": "8c1b0bb6-18e0-4ce2-b008-c12f7faada1f",
+          "workflowVersionId": "83f8d6e6-bbcb-4d00-a2e5-8dbbc558ca59"
+        }
+      ],
+      "workflowConfig": {
+        "CronInput": null,
+        "CronTriggers": null,
+        "DefaultPriority": null,
+        "EventTriggers": null,
+        "Name": "mc-contract-r2",
+        "Sticky": null,
+        "Tasks": [
+          {
+            "Action": "mc-contract-r2:mc-contract-r2",
+            "DesiredWorkerLabels": null,
+            "Parents": [],
+            "RateLimits": [],
+            "ReadableId": "mc-contract-r2",
+            "Retries": 0,
+            "RetryBackoffFactor": null,
+            "RetryBackoffMaxSeconds": null,
+            "ScheduleTimeout": null,
+            "Timeout": "300s",
+            "TriggerConditions": [],
+            "isDurable": true,
+            "slotRequests": {
+              "durable": 1
+            }
+          }
+        ],
+        "description": "",
+        "idempotency": {
+          "expression": "input.multica_run_id",
+          "method": "TTL",
+          "ttlMs": 3600000
+        }
+      }
+    },
+    "status": 200
+  },
+  "cross-tenant": {
+    "body": {
+      "message": "Please provide valid credentials"
+    },
+    "status": 403
+  },
+  "duplicate": {
+    "body": {
+      "message": "Internal Server Error"
+    },
+    "status": 500
+  },
+  "durable-wait": {
+    "body": [
+      {
+        "branchId": 1,
+        "insertedAt": "2026-09-30T09:15:57.83404+08:00",
+        "isSatisfied": true,
+        "kind": "MEMO",
+        "nodeId": 1,
+        "satisfiedAt": "2026-09-30T09:15:57.841446+08:00",
+        "taskDisplayName": "mc-contract-r1-1790730944870",
+        "taskExternalId": "4544cfda-aff5-4232-a0ec-6b1ac50a2556"
+      },
+      {
+        "branchId": 1,
+        "insertedAt": "2026-09-30T09:15:57.84588+08:00",
+        "isSatisfied": false,
+        "kind": "WAIT_FOR",
+        "nodeId": 2,
+        "taskDisplayName": "mc-contract-r1-1790730944870",
+        "taskExternalId": "4544cfda-aff5-4232-a0ec-6b1ac50a2556",
+        "waitData": [
+          {
+            "kind": "SLEEP",
+            "sleepDurationMs": 12000
+          }
+        ]
+      }
+    ],
+    "status": 200
+  },
+  "login": {
+    "body": {
+      "authenticated": true
+    },
+    "status": 200
+  },
+  "logs": {
+    "body": {
+      "pagination": {
+        "current_page": 0,
+        "next_page": 0,
+        "num_pages": 0
+      },
+      "rows": [
+        {
+          "attempt": 1,
+          "createdAt": "2026-09-30T09:15:57.841043+08:00",
+          "level": "INFO",
+          "message": "probe r1",
+          "metadata": {},
+          "retryCount": 0,
+          "taskDisplayName": "mc-contract-r1-1790730944870",
+          "taskExternalId": "4544cfda-aff5-4232-a0ec-6b1ac50a2556"
+        },
+        {
+          "attempt": 2,
+          "createdAt": "2026-09-30T09:17:04.696116+08:00",
+          "level": "INFO",
+          "message": "probe r1",
+          "metadata": {},
+          "retryCount": 1,
+          "taskDisplayName": "mc-contract-r1-1790730944870",
+          "taskExternalId": "4544cfda-aff5-4232-a0ec-6b1ac50a2556"
+        }
+      ]
+    },
+    "status": 200
+  },
+  "product-replay": {
+    "body": {
+      "run": {
+        "additionalMetadata": {
+          "traceparent": "00-46977dd2cebf222b6eda1b571fd582bd-729792654103f195-01"
+        },
+        "createdAt": "2026-09-30T09:17:05.135365+08:00",
+        "displayName": "mc-contract-r2-1790731025115",
+        "duration": 847,
+        "errorMessage": "",
+        "finishedAt": "2026-09-30T09:17:05.982703+08:00",
+        "input": {
+          "input": {
+            "delay": 0,
+            "multica_run_id": "ba5be5a3-4b5f-4cd1-9240-6f63730ab002",
+            "payload": {
+              "message": "probe"
+            }
+          },
+          "overrides": null,
+          "parents": {},
+          "triggered_by": "manual",
+          "triggers": {
+            "filter_payload": null
+          },
+          "user_data": null
+        },
+        "metadata": {
+          "createdAt": "2026-09-30T09:17:05.104776+08:00",
+          "id": "3a63033d-1f78-492c-a00c-081c4e617668",
+          "updatedAt": "2026-09-30T09:17:05.104776+08:00"
+        },
+        "output": {
+          "multica_run_id": "ba5be5a3-4b5f-4cd1-9240-6f63730ab002",
+          "payload": {
+            "message": "probe"
+          },
+          "revision": "r2"
+        },
+        "startedAt": "2026-09-30T09:17:05.135365+08:00",
+        "status": "COMPLETED",
+        "tenantId": "47d98f08-2351-403a-b710-5bc3cf056edc",
+        "workflowId": "d6a20eb1-2c9c-4061-976b-3816f8247409",
+        "workflowVersionId": "83f8d6e6-bbcb-4d00-a2e5-8dbbc558ca59"
+      },
+      "shape": [
+        {
+          "childrenStepIds": [],
+          "stepId": "a6a8bf57-14b4-4ab1-a0b4-255e2b20a780",
+          "taskExternalId": "3a63033d-1f78-492c-a00c-081c4e617668",
+          "taskName": "mc-contract-r2"
+        }
+      ],
+      "taskEvents": [],
+      "tasks": [
+        {
+          "actionId": "mc-contract-r2:mc-contract-r2",
+          "additionalMetadata": {
+            "traceparent": "00-46977dd2cebf222b6eda1b571fd582bd-729792654103f195-01"
+          },
+          "attempt": 1,
+          "createdAt": "2026-09-30T09:17:05.104776+08:00",
+          "displayName": "mc-contract-r2-1790731025115",
+          "duration": 850,
+          "errorMessage": "",
+          "finishedAt": "2026-09-30T09:17:05.975303+08:00",
+          "input": {
+            "input": {
+              "delay": 0,
+              "multica_run_id": "ba5be5a3-4b5f-4cd1-9240-6f63730ab002",
+              "payload": {
+                "message": "probe"
+              }
+            },
+            "overrides": null,
+            "parents": {},
+            "triggered_by": "manual",
+            "triggers": {
+              "filter_payload": null
+            },
+            "user_data": null
+          },
+          "isDurable": true,
+          "isEvicted": false,
+          "metadata": {
+            "createdAt": "2026-09-30T09:17:05.104776+08:00",
+            "id": "3a63033d-1f78-492c-a00c-081c4e617668",
+            "updatedAt": "2026-09-30T09:17:05.104776+08:00"
+          },
+          "numSpawnedChildren": 0,
+          "output": {
+            "multica_run_id": "ba5be5a3-4b5f-4cd1-9240-6f63730ab002",
+            "payload": {
+              "message": "probe"
+            },
+            "revision": "r2"
+          },
+          "retryCount": 0,
+          "startedAt": "2026-09-30T09:17:05.124937+08:00",
+          "status": "COMPLETED",
+          "stepId": "a6a8bf57-14b4-4ab1-a0b4-255e2b20a780",
+          "taskExternalId": "3a63033d-1f78-492c-a00c-081c4e617668",
+          "taskId": 2,
+          "taskInsertedAt": "2026-09-30T09:17:05.104776+08:00",
+          "tenantId": "47d98f08-2351-403a-b710-5bc3cf056edc",
+          "type": "TASK",
+          "workflowId": "d6a20eb1-2c9c-4061-976b-3816f8247409",
+          "workflowRunExternalId": "3a63033d-1f78-492c-a00c-081c4e617668",
+          "workflowVersionId": "83f8d6e6-bbcb-4d00-a2e5-8dbbc558ca59"
+        }
+      ],
+      "workflowConfig": {
+        "CronInput": null,
+        "CronTriggers": null,
+        "DefaultPriority": null,
+        "EventTriggers": null,
+        "Name": "mc-contract-r2",
+        "Sticky": null,
+        "Tasks": [
+          {
+            "Action": "mc-contract-r2:mc-contract-r2",
+            "DesiredWorkerLabels": null,
+            "Parents": [],
+            "RateLimits": [],
+            "ReadableId": "mc-contract-r2",
+            "Retries": 0,
+            "RetryBackoffFactor": null,
+            "RetryBackoffMaxSeconds": null,
+            "ScheduleTimeout": null,
+            "Timeout": "300s",
+            "TriggerConditions": [],
+            "isDurable": true,
+            "slotRequests": {
+              "durable": 1
+            }
+          }
+        ],
+        "description": "",
+        "idempotency": {
+          "expression": "input.multica_run_id",
+          "method": "TTL",
+          "ttlMs": 3600000
+        }
+      }
+    },
+    "status": 200
+  },
+  "reconcile": {
+    "body": {
+      "pagination": {
+        "current_page": 1,
+        "next_page": 2,
+        "num_pages": 1
+      },
+      "rows": [
+        {
+          "actionId": "",
+          "additionalMetadata": {
+            "traceparent": "00-176730633c192a0be8ebf45cd0659ed0-06199aeb30157d2f-01"
+          },
+          "attempt": 1,
+          "createdAt": "2026-09-30T09:15:44.86156+08:00",
+          "displayName": "mc-contract-r1-1790730944870",
+          "errorMessage": "",
+          "idempotencyKey": "ba5be5a3-4b5f-4cd1-9240-6f63730ab001",
+          "input": {},
+          "metadata": {
+            "createdAt": "2026-09-30T09:15:44.86156+08:00",
+            "id": "4544cfda-aff5-4232-a0ec-6b1ac50a2556",
+            "updatedAt": "2026-09-30T09:15:44.86156+08:00"
+          },
+          "numSpawnedChildren": 0,
+          "output": {},
+          "retryCount": 0,
+          "status": "QUEUED",
+          "stepId": "51e3ba7f-dc8e-414d-b200-a81b190d4588",
+          "taskExternalId": "4544cfda-aff5-4232-a0ec-6b1ac50a2556",
+          "taskId": 1,
+          "taskInsertedAt": "2026-09-30T09:15:44.86156+08:00",
+          "tenantId": "47d98f08-2351-403a-b710-5bc3cf056edc",
+          "type": "TASK",
+          "workflowId": "67f4d38b-e7cc-4f92-9599-e94903f6ca7f",
+          "workflowName": "mc-contract-r1",
+          "workflowRunExternalId": "4544cfda-aff5-4232-a0ec-6b1ac50a2556",
+          "workflowVersionId": "c4081576-7ba7-4487-a268-4a5e3fd20cd0"
+        }
+      ]
+    },
+    "status": 200
+  },
+  "recovered-run": {
+    "body": {
+      "run": {
+        "additionalMetadata": {
+          "traceparent": "00-176730633c192a0be8ebf45cd0659ed0-06199aeb30157d2f-01"
+        },
+        "createdAt": "2026-09-30T09:17:04.672146+08:00",
+        "displayName": "mc-contract-r1-1790730944870",
+        "duration": 39,
+        "errorMessage": "",
+        "finishedAt": "2026-09-30T09:17:04.711985+08:00",
+        "input": {
+          "input": {
+            "delay": 12,
+            "multica_run_id": "ba5be5a3-4b5f-4cd1-9240-6f63730ab001",
+            "payload": {
+              "message": "probe"
+            }
+          },
+          "overrides": null,
+          "parents": {},
+          "triggered_by": "manual",
+          "triggers": {
+            "filter_payload": null
+          },
+          "user_data": null
+        },
+        "metadata": {
+          "createdAt": "2026-09-30T09:15:44.86156+08:00",
+          "id": "4544cfda-aff5-4232-a0ec-6b1ac50a2556",
+          "updatedAt": "2026-09-30T09:15:44.86156+08:00"
+        },
+        "output": {
+          "multica_run_id": "ba5be5a3-4b5f-4cd1-9240-6f63730ab001",
+          "payload": {
+            "message": "probe"
+          },
+          "revision": "r1"
+        },
+        "startedAt": "2026-09-30T09:17:04.672146+08:00",
+        "status": "COMPLETED",
+        "tenantId": "47d98f08-2351-403a-b710-5bc3cf056edc",
+        "workflowId": "67f4d38b-e7cc-4f92-9599-e94903f6ca7f",
+        "workflowVersionId": "c4081576-7ba7-4487-a268-4a5e3fd20cd0"
+      },
+      "shape": [
+        {
+          "childrenStepIds": [],
+          "stepId": "51e3ba7f-dc8e-414d-b200-a81b190d4588",
+          "taskExternalId": "4544cfda-aff5-4232-a0ec-6b1ac50a2556",
+          "taskName": "mc-contract-r1"
+        }
+      ],
+      "taskEvents": [],
+      "tasks": [
+        {
+          "actionId": "mc-contract-r1:mc-contract-r1",
+          "additionalMetadata": {
+            "traceparent": "00-176730633c192a0be8ebf45cd0659ed0-06199aeb30157d2f-01"
+          },
+          "attempt": 2,
+          "createdAt": "2026-09-30T09:15:44.86156+08:00",
+          "displayName": "mc-contract-r1-1790730944870",
+          "duration": 24,
+          "errorMessage": "",
+          "finishedAt": "2026-09-30T09:17:04.70627+08:00",
+          "input": {
+            "input": {
+              "delay": 12,
+              "multica_run_id": "ba5be5a3-4b5f-4cd1-9240-6f63730ab001",
+              "payload": {
+                "message": "probe"
+              }
+            },
+            "overrides": null,
+            "parents": {},
+            "triggered_by": "manual",
+            "triggers": {
+              "filter_payload": null
+            },
+            "user_data": null
+          },
+          "isDurable": true,
+          "isEvicted": false,
+          "metadata": {
+            "createdAt": "2026-09-30T09:15:44.86156+08:00",
+            "id": "4544cfda-aff5-4232-a0ec-6b1ac50a2556",
+            "updatedAt": "2026-09-30T09:15:44.86156+08:00"
+          },
+          "numSpawnedChildren": 0,
+          "output": {
+            "multica_run_id": "ba5be5a3-4b5f-4cd1-9240-6f63730ab001",
+            "payload": {
+              "message": "probe"
+            },
+            "revision": "r1"
+          },
+          "retryCount": 1,
+          "startedAt": "2026-09-30T09:17:04.681933+08:00",
+          "status": "COMPLETED",
+          "stepId": "51e3ba7f-dc8e-414d-b200-a81b190d4588",
+          "taskExternalId": "4544cfda-aff5-4232-a0ec-6b1ac50a2556",
+          "taskId": 1,
+          "taskInsertedAt": "2026-09-30T09:15:44.86156+08:00",
+          "tenantId": "47d98f08-2351-403a-b710-5bc3cf056edc",
+          "type": "TASK",
+          "workflowId": "67f4d38b-e7cc-4f92-9599-e94903f6ca7f",
+          "workflowRunExternalId": "4544cfda-aff5-4232-a0ec-6b1ac50a2556",
+          "workflowVersionId": "c4081576-7ba7-4487-a268-4a5e3fd20cd0"
+        }
+      ],
+      "workflowConfig": {
+        "CronInput": null,
+        "CronTriggers": null,
+        "DefaultPriority": null,
+        "EventTriggers": null,
+        "Name": "mc-contract-r1",
+        "Sticky": null,
+        "Tasks": [
+          {
+            "Action": "mc-contract-r1:mc-contract-r1",
+            "DesiredWorkerLabels": null,
+            "Parents": [],
+            "RateLimits": [],
+            "ReadableId": "mc-contract-r1",
+            "Retries": 0,
+            "RetryBackoffFactor": null,
+            "RetryBackoffMaxSeconds": null,
+            "ScheduleTimeout": null,
+            "Timeout": "300s",
+            "TriggerConditions": [],
+            "isDurable": true,
+            "slotRequests": {
+              "durable": 1
+            }
+          }
+        ],
+        "description": "",
+        "idempotency": {
+          "expression": "input.multica_run_id",
+          "method": "TTL",
+          "ttlMs": 3600000
+        }
+      }
+    },
+    "status": 200
+  },
+  "status": {
+    "body": "COMPLETED",
+    "status": 200
+  },
+  "submit": {
+    "body": {
+      "run": {
+        "displayName": "",
+        "input": {},
+        "metadata": {
+          "createdAt": "2026-09-30T01:15:44.886457Z",
+          "id": "4544cfda-aff5-4232-a0ec-6b1ac50a2556",
+          "updatedAt": "2026-09-30T01:15:44.886457Z"
+        },
+        "output": {},
+        "status": "",
+        "tenantId": "00000000-0000-0000-0000-000000000000",
+        "workflowId": "00000000-0000-0000-0000-000000000000"
+      },
+      "shape": null,
+      "taskEvents": null,
+      "tasks": null
+    },
+    "status": 200
+  },
+  "tenant-probe-a": {
+    "body": {
+      "alertMemberEmails": true,
+      "analyticsOptOut": false,
+      "dataRetentionPeriod": "720h",
+      "environment": "development",
+      "metadata": {
+        "createdAt": "2026-09-30T01:15:44.207Z",
+        "id": "47d98f08-2351-403a-b710-5bc3cf056edc",
+        "updatedAt": "2026-09-30T01:15:44.207Z"
+      },
+      "name": "probe-a",
+      "serverUrl": "http://127.0.0.1:56604",
+      "slug": "probe-a",
+      "version": "V1"
+    },
+    "status": 200
+  },
+  "tenant-probe-b": {
+    "body": {
+      "alertMemberEmails": true,
+      "analyticsOptOut": false,
+      "dataRetentionPeriod": "720h",
+      "environment": "development",
+      "metadata": {
+        "createdAt": "2026-09-30T01:15:44.223Z",
+        "id": "1996d79e-5942-40f0-8b10-5286419d3796",
+        "updatedAt": "2026-09-30T01:15:44.223Z"
+      },
+      "name": "probe-b",
+      "serverUrl": "http://127.0.0.1:56604",
+      "slug": "probe-b",
+      "version": "V1"
+    },
+    "status": 200
+  },
+  "tenant-token-provisioning": {
+    "body": {
+      "message": "Please provide valid credentials"
+    },
+    "status": 403
+  }
+}
