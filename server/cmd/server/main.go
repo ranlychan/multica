@@ -22,6 +22,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/dbstartup"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/handler"
+	"github.com/multica-ai/multica/server/internal/hatchet"
 	"github.com/multica-ai/multica/server/internal/integrations/wecom"
 	"github.com/multica-ai/multica/server/internal/logger"
 	"github.com/multica-ai/multica/server/internal/maintenance"
@@ -608,6 +609,11 @@ func main() {
 	defer analyticsClient.Close()
 
 	queries := db.New(pool)
+	hatchetConfig, err := hatchet.ParseConfig(os.Getenv, dbURL)
+	if err != nil {
+		slog.Error("workflow engine configuration failed", "error", err)
+		os.Exit(1)
+	}
 	hub.SetAuthorizer(newScopeAuthorizer(queries))
 	// Order matters: subscriber listeners must register BEFORE notification listeners.
 	// The notification listener queries the subscriber table to determine recipients,
@@ -678,6 +684,26 @@ func main() {
 		slog.Error("invalid MULTICA_LLM_DISABLE_THINKING", "error", err)
 		os.Exit(1)
 	}
+	workflowStartupCtx, stopWorkflowStartup := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	hatchetSupervisor, hatchetTenants, err := startHatchet(workflowStartupCtx, hatchetConfig, pool)
+	stopWorkflowStartup()
+	if err != nil {
+		slog.Error("workflow engine startup failed", "error", err)
+		os.Exit(1)
+	}
+	stopHatchet := func() {
+		timeout := hatchetConfig.ShutdownTimeout
+		if timeout <= 0 {
+			timeout = 30 * time.Second
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		if err := hatchetSupervisor.Shutdown(ctx); err != nil {
+			slog.Warn("workflow engine drain interrupted", "error", err)
+		}
+	}
+	defer stopHatchet()
+	_ = hatchetTenants // Workflow handlers consume this service in Task3/4.
 
 	r, h := NewRouterWithOptions(pool, hub, bus, analyticsClient, storeRedis, RouterOptions{
 		HTTPMetrics:         httpMetrics,
@@ -875,6 +901,7 @@ func main() {
 		slog.Info("server starting", "port", port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("server error", "error", err)
+			stopHatchet()
 			os.Exit(1)
 		}
 	}()
@@ -913,11 +940,13 @@ func main() {
 			if err := srv.Shutdown(apiShutdownCtx); err != nil {
 				apiShutdownCancel()
 				slog.Error("server forced to shutdown", "error", err)
+				stopHatchet()
 				os.Exit(1)
 			}
 			apiShutdownCancel()
 		},
 		StopOutboundRelay: stopRelay,
+		DrainHatchet:      stopHatchet,
 		CancelWorkers:     sweepCancel,
 		StopHeartbeats:    heartbeatScheduler.Stop,
 		JoinWebhookWorker: func() {

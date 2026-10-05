@@ -11,6 +11,12 @@ RUN cd server && go mod download
 
 # Copy server source
 COPY server/ ./server/
+COPY scripts/build-hatchet.sh ./scripts/build-hatchet.sh
+
+# Default builds never clone upstream. Opt-in builds ship the exact pin plus
+# the audited private-listener patch and its verified binary receipts.
+ARG WITH_HATCHET=0
+RUN mkdir -p server/bin/hatchet && if [ "$WITH_HATCHET" = "1" ]; then apk add --no-cache bash && bash scripts/build-hatchet.sh; fi
 
 # Build binaries
 ARG VERSION=dev
@@ -27,10 +33,13 @@ RUN cd server && CGO_ENABLED=0 go build -ldflags "-s -w" -o bin/backfill_codex_u
 FROM alpine:3.21
 
 RUN apk add --no-cache ca-certificates tzdata
+ARG WITH_HATCHET=0
+RUN if [ "$WITH_HATCHET" = "1" ]; then apk add --no-cache bash openssl; fi
 
 WORKDIR /app
 
 COPY --from=builder /src/server/bin/server .
+COPY --from=builder /src/server/bin/hatchet ./hatchet/
 COPY --from=builder /src/server/bin/multica .
 COPY --from=builder /src/server/bin/migrate .
 COPY --from=builder /src/server/bin/maintenance .

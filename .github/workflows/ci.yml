@@ -8,12 +8,34 @@ on:
   schedule:
     - cron: "23 3 * * *"
   workflow_dispatch:
+    inputs:
+      package_hatchet:
+        description: Build opt-in pinned private Hatchet bundle
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  hatchet-package:
+    if: github.event_name == 'workflow_dispatch' && inputs.package_hatchet
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.7'
+      - run: make build-hatchet
+      - name: Verify packaged contract
+        run: cd server && HATCHET_BIN_DIR="$PWD/bin/hatchet" go test ./internal/hatchet -run 'TestPinnedCompatibility/built_binary_help|TestHatchetBundledReceipt' -count=1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hatchet-private-bundle
+          path: server/bin/hatchet/
   # PRs and main pushes use the same paths. Scheduled/manual runs validate all
   # scopes, including platform stress tests, without charging every merge for them.
   changes:

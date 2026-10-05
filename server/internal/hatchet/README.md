@@ -135,8 +135,82 @@ The checked-in HTTP fixture omits credentials/cookies. Its `login` and
 records harness crash/restart times and the worker's post-sleep completion.
 Other bodies are real responses from the successful TLS probe.
 
-A build target, supervisor and container integration are later tasks; this change
-does not claim they already exist.
+## Bundled supervisor and opt-in packaging
+
+`make build-hatchet` builds the four binaries into `server/bin/hatchet`.
+`make build-with-hatchet` also builds Multica. Ordinary `make build` never clones
+Hatchet. Set `HATCHET_UPSTREAM_DIR` to reuse a local Git object database: the
+builder verifies the full commit and archives it to a disposable directory,
+without changing the source checkout. `HATCHET_OUTPUT_DIR` selects the bundle.
+The Docker image opts in with `--build-arg WITH_HATCHET=1`; manual CI can opt in
+with `package_hatchet`. The MIT license accompanies each bundle.
+
+The original pinned API and health listeners hardcode `:port`. The audited
+`private-listeners.patch` changes exactly those two binds to `127.0.0.1`; gRPC
+retains its configured TLS/mTLS bind. The builder checks/applies this patch to
+the exact full pin and emits `PIN`, `PATCH_SHA256` and `BINARIES_SHA256` receipts.
+The supervisor refuses absent/mismatched receipts or changed binaries. Receipts
+are operator-trusted packaging provenance, not signed supply-chain attestations.
+Unpatched upstream binaries are not supported by the bundled supervisor.
+
+Default `MULTICA_HATCHET_ENABLED=false` does no engine startup or cleanup work.
+Enabled Unix deployments require a dedicated `MULTICA_HATCHET_DATABASE_URL`,
+absolute `MULTICA_HATCHET_STATE_DIR` and `MULTICA_HATCHET_BINARY_DIR`, private
+`MULTICA_HATCHET_API_URL=http://127.0.0.1:PORT`, worker
+`MULTICA_HATCHET_GRPC_ADDRESS=HOST:PORT`, `MULTICA_HATCHET_TLS_STRATEGY=tls|mtls`,
+private provisioning email/password and a stable base64-encoded 32-byte
+`MULTICA_HATCHET_SECRET_KEY` for application tenant mappings. Public gRPC binds
+require mTLS. Provisioning credentials and this key stay server-side. Bash and
+OpenSSL are needed only for first bootstrap. Windows retains disabled server
+support and rejects enabled bundled startup.
+
+Startup verifies the bundle, migrates, bootstraps an empty private state
+directory and seeds before starting engine/API. A bootstrap receipt hashes the
+configuration, encryption/JWT keysets and TLS material. Restart validates and
+preserves those files; partial state or altered files fails closed. Preserve the
+matching directory and dedicated DB backup together. Generated certificates
+last one year; renewal requires coordinated operator maintenance of the state
+receipt and trusted client material. Never rerun quickstart over an existing
+directory. Public clients verify the generated server name `cluster` and use a
+certificate signed by the preserved CA for mTLS.
+
+`Supervisor.Start(ctx)`, `Ready()` and `Shutdown(ctx)` provide the run-service
+gate. Readiness requires the private engine `/ready` and API `/api/v1/meta`, and
+becomes false on child exit or shutdown. Shutdown stops cleanup, stops the API
+and drains the engine before the application DB closes; deadlines kill only
+owned process groups. No workspace-authored code runs in these processes.
+Task4 must reject new runs with `ErrUnavailable` unless `Ready()` is true, and
+Task5 must require an eligible daemon rather than a server execution fallback.
+
+The server constructs `NewSQLTenantService` and retries persistent fenced SQL
+deletion tombstones asynchronously. Failed undisclosed fresh worker issuance
+also retains an in-memory token-ID retry receipt; a process crash loses that
+best-effort receipt, while the undisclosed token expires within24h and remains
+discoverable by its reserved name for later workspace cleanup. No durable
+issuance retry queue is claimed.
+
+The pinned token repository uses a default5s cache
+(`pkg/config/database/config.go`, `pkg/repository/api_token.go`). Live revocation
+returned204; a new worker immediately after revoke could still authenticate
+and its heartbeat was rejected about8s later. After7s, fresh worker registration
+was rejected. An already authenticated action stream received a new assignment
+after revocation/cache expiry. Thus engine revocation neither provides immediate
+authorization rejection nor force-disconnects every established stream.
+Runner endpoints must independently reject removed/revoked Multica runner
+tokens and workspace membership; cleanup must not rely on engine revoke to
+instantly stop authored code.
+
+Repeat the disposable patched lifecycle smoke on macOS with `lsof` available:
+
+```sh
+HATCHET_SUPERVISOR_LIVE=1 HATCHET_BIN_DIR=/absolute/patched/bundle \
+HATCHET_PROBE_WORKER=/absolute/pinned/bin/multica-compat-probe \
+go test ./internal/hatchet -run TestHatchetSupervisorPinnedLifecycle -count=1 -v -timeout=5m
+```
+
+The worker probe runs only in this explicit test harness. It proves mTLS,
+actual listener bindings, revoke cache/stream behavior and preserved-key restart
+using its own uniquely named disposable PostgreSQL and child processes.
 
 ## Upgrade and rollback limits
 

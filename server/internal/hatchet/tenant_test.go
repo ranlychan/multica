@@ -227,7 +227,7 @@ func TestHatchetWorkerTransientReadOnlyRevokesIssuedToken(t *testing.T) {
 					t.Fatalf("unusable retry receipt: %v", err)
 				}
 				failRevoke = false
-				if retryErr := service.RetryWorkerTokenRevocation(context.Background(), receipt); retryErr != nil {
+				if retryErr := service.CleanupPending(context.Background()); retryErr != nil {
 					t.Fatal(retryErr)
 				}
 				if len(revoked) != 2 || revoked[1] != "/api/v1/api-tokens/"+testWorkerTokenID {

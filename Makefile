@@ -341,6 +341,12 @@ build: ## Build the server, CLI, and migrate binaries into server/bin
 	cd server && go build -ldflags "-X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)" -o bin/multica$(EXE) ./cmd/multica
 	cd server && go build -o bin/migrate$(EXE) ./cmd/migrate
 
+.PHONY: build-hatchet build-with-hatchet
+build-hatchet: ## Opt-in: build pinned Hatchet binaries with private listeners
+	bash scripts/build-hatchet.sh
+
+build-with-hatchet: build build-hatchet ## Build Multica and its opt-in workflow engine
+
 test: ## Run Go tests after ensuring the target DB exists and migrations are applied
 	$(REQUIRE_ENV)
 	@bash scripts/ensure-postgres.sh "$(ENV_FILE)"

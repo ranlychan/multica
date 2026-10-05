@@ -32,6 +32,10 @@ type shutdownSequence struct {
 	// below a drain rather than a race.
 	DrainHTTP func()
 
+	// DrainHatchet stops private submission API and drains the workflow engine
+	// after product requests finish, while the tenant cleanup database is alive.
+	DrainHatchet func()
+
 	// StopOutboundRelay BEFORE CancelWorkers. See the file header: the
 	// dispatcher's drain can only deliver while the supervised sockets are
 	// still live, and CancelWorkers is what starts tearing them down.
@@ -66,6 +70,7 @@ func (s shutdownSequence) run() {
 		s.StopAutopilot,
 		s.DrainMaintenance,
 		s.DrainHTTP,
+		s.DrainHatchet,
 		s.StopOutboundRelay,
 		s.CancelWorkers,
 		s.StopHeartbeats,

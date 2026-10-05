@@ -43,4 +43,5 @@ coverage
 # Repository-only tooling
 /.github/
 /deploy/
-/scripts/
+/scripts/*
+!/scripts/build-hatchet.sh

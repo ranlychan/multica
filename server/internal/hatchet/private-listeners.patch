@@ -1,0 +1,12 @@
+diff --git a/api/v1/server/run/run.go b/api/v1/server/run/run.go
+--- a/api/v1/server/run/run.go
++++ b/api/v1/server/run/run.go
+@@ -177,1 +177,1 @@
+-		if err := e.Start(fmt.Sprintf(":%d", t.config.Runtime.Port)); err != nil && !errors.Is(err, http.ErrServerClosed) {
++		if err := e.Start(fmt.Sprintf("127.0.0.1:%d", t.config.Runtime.Port)); err != nil && !errors.Is(err, http.ErrServerClosed) {
+diff --git a/internal/services/health/health.go b/internal/services/health/health.go
+--- a/internal/services/health/health.go
++++ b/internal/services/health/health.go
+@@ -79,1 +79,1 @@
+-		Addr:         fmt.Sprintf(":%d", port),
++		Addr:         fmt.Sprintf("127.0.0.1:%d", port),

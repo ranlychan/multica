@@ -29,13 +29,14 @@ type TenantStore interface {
 var _ TenantStore = (*db.Queries)(nil)
 
 type TenantService struct {
-	client          *Client
-	store           TenantStore
-	box             *secretbox.Box
-	email, password string
-	mu              sync.Mutex
-	queries         *db.Queries
-	tx              TenantTxStarter
+	client             *Client
+	store              TenantStore
+	box                *secretbox.Box
+	email, password    string
+	mu                 sync.Mutex
+	queries            *db.Queries
+	tx                 TenantTxStarter
+	pendingRevocations map[string]*WorkerTokenRevocationError
 }
 
 type TenantTxStarter interface {
@@ -280,9 +281,50 @@ func (s *TenantService) abandonWorker(ctx context.Context, tenant, id string, ca
 	revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 	if _, e := s.client.request(revokeCtx, "POST", "/api/v1/api-tokens/"+id, "", nil); e != nil {
-		return errors.Join(cause, &WorkerTokenRevocationError{TenantID: tenant, TokenID: id})
+		receipt := &WorkerTokenRevocationError{TenantID: tenant, TokenID: id}
+		// Caller holds mu. Best-effort retries survive the request, not a process
+		// crash; the undisclosed worker token still has its bounded TTL.
+		if s.pendingRevocations == nil {
+			s.pendingRevocations = make(map[string]*WorkerTokenRevocationError)
+		}
+		s.pendingRevocations[id] = receipt
+		return errors.Join(cause, receipt)
 	}
 	return cause
+}
+
+// CleanupPending retries undisclosed issuance receipts and persistent workspace
+// tombstones. Database failures never erase or advance deletion receipts.
+func (s *TenantService) CleanupPending(ctx context.Context) error {
+	s.mu.Lock()
+	receipts := make([]*WorkerTokenRevocationError, 0, len(s.pendingRevocations))
+	for _, receipt := range s.pendingRevocations {
+		receipts = append(receipts, receipt)
+	}
+	s.mu.Unlock()
+	var result error
+	for _, receipt := range receipts {
+		if err := s.RetryWorkerTokenRevocation(ctx, receipt); err != nil {
+			result = errors.Join(result, err)
+		} else {
+			s.mu.Lock()
+			delete(s.pendingRevocations, receipt.TokenID)
+			s.mu.Unlock()
+		}
+	}
+	if s.queries == nil {
+		return result
+	}
+	rows, err := s.queries.ListWorkflowHatchetTenantDeletions(ctx, 100)
+	if err != nil {
+		return errors.Join(result, errors.New("hatchet: pending tenant cleanup read failed"))
+	}
+	for _, row := range rows {
+		if err := s.Cleanup(ctx, row.WorkspaceID, time.Now()); err != nil && !errors.Is(err, ErrTenantDeletionUnsupported) && !errors.Is(err, pgx.ErrNoRows) {
+			result = errors.Join(result, err)
+		}
+	}
+	return result
 }
 
 // WorkerCredentials mints a separate tenant-only token. The server token and
