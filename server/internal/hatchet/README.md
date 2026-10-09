@@ -164,6 +164,13 @@ require mTLS. Provisioning credentials and this key stay server-side. Bash and
 OpenSSL are needed only for first bootstrap. Windows retains disabled server
 support and rejects enabled bundled startup.
 
+The internal API-to-engine client dials the configured explicit gRPC bind host,
+or same-family loopback for a wildcard bind, and verifies the preserved
+`cluster` certificate identity. A wildcard bind such as `0.0.0.0` or `::` is not
+an externally dialable worker endpoint. Task5's worker descriptor must select a
+reachable advertised host and matching certificate identity instead of passing
+the raw wildcard to a remote daemon.
+
 Startup verifies the bundle, migrates, bootstraps an empty private state
 directory and seeds before starting engine/API. A bootstrap receipt hashes the
 configuration, encryption/JWT keysets and TLS material. Restart validates and

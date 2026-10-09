@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"os"
@@ -30,7 +31,18 @@ func TestHatchetSupervisorPinnedLifecycle(t *testing.T) {
 	dbport := strings.TrimSpace(l.command(nil, "docker", "port", name, "5432/tcp"))
 	l.wait("postgres", 30*time.Second, func() bool { return exec.Command("docker", "exec", name, "pg_isready", "-U", "postgres").Run() == nil })
 	apiPort, grpcPort := freePort(t), freePort(t)
-	c := Config{Enabled: true, DatabaseURL: "postgres://postgres:disposable@" + dbport + "/hatchet?sslmode=disable", APIURL: "http://127.0.0.1:" + apiPort, GRPCAddress: "0.0.0.0:" + grpcPort, TLSStrategy: "mtls", StateDir: filepath.Join(root, "state"), BinaryDir: bin, ProvisioningEmail: "supervisor@example.com", ProvisioningPassword: "DisposablePassword123!", StartupTimeout: 90 * time.Second, ShutdownTimeout: 15 * time.Second}
+	bindHost := os.Getenv("HATCHET_SUPERVISOR_BIND_HOST")
+	if bindHost == "" {
+		bindHost = "0.0.0.0"
+	}
+	dialHost := bindHost
+	if dialHost == "0.0.0.0" {
+		dialHost = "127.0.0.1"
+	} else if dialHost == "::" {
+		dialHost = "::1"
+	}
+	workerAddress := net.JoinHostPort(dialHost, grpcPort)
+	c := Config{Enabled: true, DatabaseURL: "postgres://postgres:disposable@" + dbport + "/hatchet?sslmode=disable", APIURL: "http://127.0.0.1:" + apiPort, GRPCAddress: net.JoinHostPort(bindHost, grpcPort), TLSStrategy: "mtls", StateDir: filepath.Join(root, "state"), BinaryDir: bin, ProvisioningEmail: "supervisor@example.com", ProvisioningPassword: "DisposablePassword123!", StartupTimeout: 90 * time.Second, ShutdownTimeout: 15 * time.Second}
 	s := NewSupervisor(c, nil)
 	ctx := context.Background()
 	t.Cleanup(func() {
@@ -64,7 +76,7 @@ func TestHatchetSupervisorPinnedLifecycle(t *testing.T) {
 	ca, _ := os.ReadFile(filepath.Join(c.StateDir, "certs/ca.cert"))
 	pool := x509.NewCertPool()
 	pool.AppendCertsFromPEM(ca)
-	noCert, err := tls.Dial("tcp", "127.0.0.1:"+grpcPort, &tls.Config{RootCAs: pool, ServerName: "cluster", MinVersion: tls.VersionTLS12})
+	noCert, err := tls.Dial("tcp", workerAddress, &tls.Config{RootCAs: pool, ServerName: "cluster", MinVersion: tls.VersionTLS12})
 	if err == nil {
 		noCert.SetReadDeadline(time.Now().Add(time.Second))
 		_, err = noCert.Read(make([]byte, 1))
@@ -105,7 +117,7 @@ func TestHatchetSupervisorPinnedLifecycle(t *testing.T) {
 	if workerBin == "" {
 		t.Fatal("probe worker required")
 	}
-	workerEnv := append(os.Environ(), "HATCHET_CLIENT_TOKEN="+token.Token, "HATCHET_CLIENT_HOST_PORT=127.0.0.1:"+grpcPort, "HATCHET_CLIENT_SERVER_URL="+c.APIURL, "HATCHET_CLIENT_TLS_STRATEGY=mtls", "HATCHET_CLIENT_TLS_SERVER_NAME=cluster", "HATCHET_CLIENT_TLS_ROOT_CA_FILE="+filepath.Join(c.StateDir, "certs/ca.cert"), "HATCHET_CLIENT_TLS_CERT_FILE="+filepath.Join(c.StateDir, "certs/client-worker.pem"), "HATCHET_CLIENT_TLS_KEY_FILE="+filepath.Join(c.StateDir, "certs/client-worker.key"), "PROBE_REVISION=r1", "PROBE_EFFECTS="+filepath.Join(root, "effects"), "PROBE_COMPLETIONS="+filepath.Join(root, "completed"))
+	workerEnv := append(os.Environ(), "HATCHET_CLIENT_TOKEN="+token.Token, "HATCHET_CLIENT_HOST_PORT="+workerAddress, "HATCHET_CLIENT_SERVER_URL="+c.APIURL, "HATCHET_CLIENT_TLS_STRATEGY=mtls", "HATCHET_CLIENT_TLS_SERVER_NAME=cluster", "HATCHET_CLIENT_TLS_ROOT_CA_FILE="+filepath.Join(c.StateDir, "certs/ca.cert"), "HATCHET_CLIENT_TLS_CERT_FILE="+filepath.Join(c.StateDir, "certs/client-worker.pem"), "HATCHET_CLIENT_TLS_KEY_FILE="+filepath.Join(c.StateDir, "certs/client-worker.key"), "PROBE_REVISION=r1", "PROBE_EFFECTS="+filepath.Join(root, "effects"), "PROBE_COMPLETIONS="+filepath.Join(root, "completed"))
 	worker := l.start(workerEnv, "authenticated-worker", workerBin)
 	l.wait("registered worker", 20*time.Second, func() bool {
 		status, body := l.request("GET", "/api/v1/tenants/"+tenant.Metadata.ID+"/workflows", nil, token.Token, nil)

@@ -15,7 +15,10 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -39,6 +42,44 @@ func TestHatchetSupervisorRejectsUnpatchedBinaries(t *testing.T) {
 	s := NewSupervisor(c, nil)
 	if err := s.Start(context.Background()); err == nil {
 		t.Fatal("unverified binaries started")
+	}
+}
+
+func TestHatchetSupervisorExplicitBindInternalAddress(t *testing.T) {
+	for _, tc := range []struct{ bind, want, listener string }{{"127.0.0.2:7070", "127.0.0.2:7070", "127.0.0.2"}, {"192.168.10.8:7070", "192.168.10.8:7070", "192.168.10.8"}, {"[::1]:7070", "[::1]:7070", "[::1]"}, {"0.0.0.0:7070", "127.0.0.1:7070", "0.0.0.0"}, {"[::]:7070", "[::1]:7070", "[::]"}} {
+		t.Run(tc.bind, func(t *testing.T) {
+			c := supervisorFixture(t)
+			c.GRPCAddress = tc.bind
+			c.TLSStrategy = "mtls"
+			env, _, err := NewSupervisor(c, nil).environment()
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "SERVER_INTERNAL_CLIENT_INTERNAL_GRPC_BROADCAST_ADDRESS=" + tc.want
+			found := false
+			identity := false
+			listener := false
+			for _, value := range env {
+				if value == want {
+					found = true
+				}
+				if value == "SERVER_INTERNAL_CLIENT_TLS_SERVER_NAME=cluster" {
+					identity = true
+				}
+				if value == "SERVER_GRPC_BIND_ADDRESS="+tc.listener {
+					listener = true
+				}
+			}
+			if !found {
+				t.Fatalf("internal client cannot reach configured bind; missing %s", want)
+			}
+			if !identity {
+				t.Fatal("internal client lost preserved certificate identity")
+			}
+			if !listener {
+				t.Fatal("bind host format does not match pinned listener")
+			}
+		})
 	}
 }
 
@@ -70,7 +111,7 @@ func TestHatchetSupervisorHealthTimeoutAndPartialCleanup(t *testing.T) {
 	for _, failAPI := range []bool{false, true} {
 		t.Run(map[bool]string{false: "health-timeout", true: "partial-startup"}[failAPI], func(t *testing.T) {
 			c := supervisorFixture(t)
-			c.StartupTimeout = 150 * time.Millisecond
+			c.StartupTimeout = 3 * time.Second
 			if failAPI {
 				if err := os.WriteFile(filepath.Join(c.BinaryDir, "hatchet-api"), []byte("#!/bin/sh\nexit 1\n"), 0700); err != nil {
 					t.Fatal(err)
@@ -80,9 +121,33 @@ func TestHatchetSupervisorHealthTimeoutAndPartialCleanup(t *testing.T) {
 			s := NewSupervisor(c, nil)
 			if err := s.Start(context.Background()); err == nil {
 				t.Fatal("startup succeeded")
+			} else {
+				t.Logf("startup failure: %v", err)
 			}
 			if s.Ready() {
 				t.Fatal("failed startup ready")
+			}
+			if runtime.GOOS != "windows" {
+				for _, name := range []string{"hatchet-engine", "hatchet-api"} {
+					raw, err := os.ReadFile(filepath.Join(c.StateDir, name+".pid"))
+					if err != nil {
+						if failAPI && name == "hatchet-api" {
+							continue
+						}
+						t.Fatal(err)
+					}
+					pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+					if err != nil {
+						t.Fatal(err)
+					}
+					process, err := os.FindProcess(pid)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := process.Signal(syscall.Signal(0)); err == nil {
+						t.Fatalf("%s survives startup cleanup (pid %d)", name, pid)
+					}
+				}
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
@@ -159,7 +224,7 @@ func supervisorFixture(t *testing.T) Config {
 			script = fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = quickstart ]; then cp -R '%s/config' '%s/certs' .; echo bootstrap >> calls; else echo seed >> calls; fi\n", fixture, fixture)
 		}
 		if name == "hatchet-engine" || name == "hatchet-api" {
-			script = "#!/bin/sh\ntrap 'exit 0' TERM INT\nwhile :; do sleep 0.05; done\n"
+			script = "#!/bin/sh\necho $$ > '" + name + ".pid'\ntrap 'exit 0' TERM INT\nwhile :; do sleep 0.05; done\n"
 		}
 		if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0700); err != nil {
 			t.Fatal(err)

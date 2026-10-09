@@ -65,6 +65,19 @@ func (s *Supervisor) environment() ([]string, string, error) {
 	if e != nil || (c.TLSStrategy != "tls" && c.TLSStrategy != "mtls") || (!privateHost(host) && c.TLSStrategy != "mtls") {
 		return nil, "", errors.New("hatchet: gRPC TLS policy invalid")
 	}
+	internalHost := host
+	if host == "0.0.0.0" {
+		internalHost = "127.0.0.1"
+	} else if host == "::" {
+		internalHost = "::1"
+	}
+	internalAddress := net.JoinHostPort(internalHost, port)
+	// The pinned listener formats "%s:%d" instead of net.JoinHostPort.
+	// Pass bracketed IPv6 to that bind field, keeping dial hosts unbracketed.
+	bindHost := host
+	if strings.Contains(host, ":") {
+		bindHost = "[" + host + "]"
+	}
 	listener, e := net.Listen("tcp", "127.0.0.1:0")
 	if e != nil {
 		return nil, "", errors.New("hatchet: health port unavailable")
@@ -75,8 +88,8 @@ func (s *Supervisor) environment() ([]string, string, error) {
 	// listener policy, queues, credentials or remote configuration.
 	env := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + c.StateDir, "DATABASE_URL=" + c.DatabaseURL,
 		"DATABASE_MAX_CONNS=15", "DATABASE_MIN_CONNS=1", "SERVER_MSGQUEUE_KIND=postgres", "SERVER_MSGQUEUE_PUBSUB_KIND=postgres",
-		"SERVER_PORT=" + u.Port(), "SERVER_URL=" + c.APIURL, "SERVER_GRPC_PORT=" + port, "SERVER_GRPC_BIND_ADDRESS=" + host,
-		"SERVER_GRPC_BROADCAST_ADDRESS=" + c.GRPCAddress, "SERVER_INTERNAL_CLIENT_INTERNAL_GRPC_BROADCAST_ADDRESS=127.0.0.1:" + port,
+		"SERVER_PORT=" + u.Port(), "SERVER_URL=" + c.APIURL, "SERVER_GRPC_PORT=" + port, "SERVER_GRPC_BIND_ADDRESS=" + bindHost,
+		"SERVER_GRPC_BROADCAST_ADDRESS=" + c.GRPCAddress, "SERVER_INTERNAL_CLIENT_INTERNAL_GRPC_BROADCAST_ADDRESS=" + internalAddress,
 		"SERVER_INTERNAL_CLIENT_TLS_SERVER_NAME=cluster", "SERVER_HEALTHCHECK_PORT=" + healthPort, "SERVER_TLS_STRATEGY=" + c.TLSStrategy, "SERVER_GRPC_INSECURE=false",
 		"SERVER_INTERNAL_CLIENT_BASE_INHERIT_BASE=false", "SERVER_INTERNAL_CLIENT_BASE_STRATEGY=" + c.TLSStrategy,
 		"SERVER_INTERNAL_CLIENT_TLS_BASE_ROOT_CA_FILE=" + filepath.Join(c.StateDir, "certs/ca.cert"),

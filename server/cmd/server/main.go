@@ -684,7 +684,8 @@ func main() {
 		slog.Error("invalid MULTICA_LLM_DISABLE_THINKING", "error", err)
 		os.Exit(1)
 	}
-	workflowStartupCtx, stopWorkflowStartup := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	workflowStartupCtx, stopWorkflowStartup, quit, stopWorkflowSignals := workflowSignals(context.Background())
+	defer stopWorkflowSignals()
 	hatchetSupervisor, hatchetTenants, err := startHatchet(workflowStartupCtx, hatchetConfig, pool)
 	stopWorkflowStartup()
 	if err != nil {
@@ -906,13 +907,10 @@ func main() {
 		}
 	}()
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-quit
 	holdBeforeShutdown(sig, quit, shutdownHoldDuration)
-	// Restore the default behavior so another signal during graceful shutdown
-	// can still terminate the process instead of being left unread in quit.
-	signal.Stop(quit)
+	// Keep termination intercepted until owned engine groups have drained;
+	// default-exiting earlier could orphan those independently owned groups.
 
 	slog.Info("shutting down server")
 

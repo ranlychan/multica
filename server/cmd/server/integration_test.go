@@ -42,6 +42,11 @@ const (
 )
 
 func TestMain(m *testing.M) {
+	// The signal-regression child owns only its process group. Reinitializing
+	// the shared DB fixture here would replace the parent test's fixture.
+	if os.Getenv("MULTICA_SIGNAL_HELPER") != "" && len(os.Args) == 2 && os.Args[1] == "-test.run=^TestHatchetSignalHelper$" {
+		os.Exit(m.Run())
+	}
 	ctx := context.Background()
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
