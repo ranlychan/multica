@@ -1520,6 +1520,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// purpose: the bearer token in the URL path IS the credential. Workspace
 	// context is derived from the trigger row, never from request headers.
 	r.Post("/api/webhooks/autopilots/{token}", h.HandleAutopilotWebhook)
+	r.Post("/api/workflow-triggers/{token}", h.HandleWorkflowIngress)
 	// GitHub App webhook (no Multica auth — requests are authenticated via
 	// HMAC-SHA256 signature in the handler) and post-install setup callback.
 	r.Post("/api/webhooks/github", h.HandleGitHubWebhook)
@@ -2155,6 +2156,34 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			// Squad leader evaluation (writes to activity_log)
 			r.Post("/api/issues/{id}/squad-evaluated", h.RecordSquadLeaderEvaluation)
 
+			// Workflows
+			r.Route("/api/workflows", func(r chi.Router) {
+				r.Get("/", h.ListWorkflows)
+				r.Post("/", h.CreateWorkflow)
+				r.Route("/{id}", func(r chi.Router) {
+					r.Get("/", h.GetWorkflow)
+					r.Patch("/", h.UpdateWorkflow)
+					r.Delete("/", h.DeleteWorkflow)
+					r.Post("/run", h.RunWorkflow)
+					r.Get("/revisions", h.ListWorkflowRevisions)
+					r.Post("/revisions", h.PublishWorkflowRevision)
+					r.Get("/revisions/{revisionId}", h.GetWorkflowRevision)
+					r.Post("/revisions/{revisionId}/validate", h.ValidateWorkflowRevision)
+					r.Get("/triggers", h.ListWorkflowTriggers)
+					r.Post("/triggers", h.CreateWorkflowTrigger)
+					r.Patch("/triggers/{triggerId}", h.UpdateWorkflowTrigger)
+					r.Delete("/triggers/{triggerId}", h.DeleteWorkflowTrigger)
+					r.Post("/triggers/{triggerId}/rotate-token", h.RotateWorkflowTriggerToken)
+					r.Get("/collaborators", h.ListWorkflowCollaborators)
+					r.Post("/collaborators", h.AddWorkflowCollaborator)
+					r.Delete("/collaborators/{userId}", h.RemoveWorkflowCollaborator)
+					r.Get("/runs", h.ListWorkflowRuns)
+					r.Get("/runs/{runId}", h.GetWorkflowRun)
+					r.Get("/runs/{runId}/logs", h.WorkflowRunLogs)
+					r.Post("/runs/{runId}/replay", h.ReplayWorkflowRun)
+					r.Post("/runs/{runId}/cancel", h.CancelWorkflowRun)
+				})
+			})
 			// Autopilots
 			r.Route("/api/autopilots", func(r chi.Router) {
 				r.Get("/", h.ListAutopilots)

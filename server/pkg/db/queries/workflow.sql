@@ -1,25 +1,29 @@
 -- Every resource lookup and mutation carries workspace scope. Global scans are scheduler-only.
 -- name: ListWorkflows :many
 SELECT * FROM workflow WHERE workspace_id=$1 ORDER BY created_at DESC;
+-- name: ListWorkflowsPage :many
+SELECT * FROM workflow WHERE workspace_id=$1 ORDER BY created_at DESC,id DESC LIMIT $2 OFFSET $3;
 -- name: GetWorkflowInWorkspace :one
 SELECT * FROM workflow WHERE id=$1 AND workspace_id=$2;
 -- name: LockWorkflowForUpdate :one
 SELECT * FROM workflow WHERE id=$1 AND workspace_id=$2 FOR UPDATE;
 -- name: CreateWorkflow :one
-INSERT INTO workflow(workspace_id,project_id,name,slug,description,hatchet_name,default_agent_id,created_by_type,created_by_id)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *;
+INSERT INTO workflow(workspace_id,project_id,name,slug,description,hatchet_name,default_agent_id,created_by_type,created_by_id,audit_actor_type,audit_actor_id)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *;
 -- name: UpdateWorkflowCAS :one
 UPDATE workflow SET name=$3,slug=$4,description=$5,project_id=$6,default_agent_id=$7,status=$8,updated_at=now()
 WHERE id=$1 AND workspace_id=$2 AND updated_at=$9 RETURNING *;
 -- name: DeleteWorkflow :exec
 DELETE FROM workflow WHERE id=$1 AND workspace_id=$2;
 -- name: CreateWorkflowRevision :one
-INSERT INTO workflow_revision(workspace_id,workflow_id,version,definition,definition_hash,definition_graph,hatchet_name,created_by_id)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *;
+INSERT INTO workflow_revision(workspace_id,workflow_id,version,definition,definition_hash,definition_graph,hatchet_name,created_by_id,audit_actor_type,audit_actor_id,expected_current_version)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *;
 -- name: GetWorkflowRevisionInWorkspace :one
 SELECT * FROM workflow_revision WHERE id=$1 AND workspace_id=$2;
 -- name: ListWorkflowRevisions :many
 SELECT * FROM workflow_revision WHERE workflow_id=$1 AND workspace_id=$2 ORDER BY version DESC;
+-- name: ListWorkflowRevisionsPage :many
+SELECT * FROM workflow_revision WHERE workflow_id=$1 AND workspace_id=$2 ORDER BY version DESC LIMIT $3 OFFSET $4;
 -- name: SetWorkflowRevisionValidation :one
 UPDATE workflow_revision SET validation_status=$3,validation_error=$4 WHERE id=$1 AND workspace_id=$2 RETURNING *;
 -- name: PublishWorkflowRevisionCAS :one
@@ -36,6 +40,8 @@ SELECT * FROM workflow_trigger WHERE workflow_id=$1 AND workspace_id=$2 ORDER BY
 SELECT * FROM workflow_trigger WHERE id=$1 AND workspace_id=$2;
 -- name: GetWorkflowTriggerByTokenHash :one
 SELECT * FROM workflow_trigger WHERE token_hash=$1 AND workspace_id=$2 AND kind='api' AND enabled;
+-- name: ResolveWorkflowIngressToken :one
+SELECT * FROM workflow_trigger WHERE token_hash=$1 AND kind='api' AND enabled;
 -- name: CreateWorkflowTrigger :one
 INSERT INTO workflow_trigger(workspace_id,workflow_id,kind,principal_user_id,enabled,cron_expression,timezone,next_run_at,input_template,label,token_hash,created_by_type,created_by_id)
 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *;

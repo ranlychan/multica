@@ -1718,6 +1718,8 @@ type Workflow struct {
 	LastRunAt         pgtype.Timestamptz `json:"last_run_at"`
 	CreatedAt         pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+	AuditActorType    pgtype.Text        `json:"audit_actor_type"`
+	AuditActorID      pgtype.UUID        `json:"audit_actor_id"`
 }
 
 type WorkflowCollaborator struct {
@@ -1775,6 +1777,10 @@ type WorkflowRevision struct {
 	PublishedAt        pgtype.Timestamptz `json:"published_at"`
 	CreatedByID        pgtype.UUID        `json:"created_by_id"`
 	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	AuditActorType     pgtype.Text        `json:"audit_actor_type"`
+	AuditActorID       pgtype.UUID        `json:"audit_actor_id"`
+	// Original publish CAS, retained for deferred trusted validation across restarts.
+	ExpectedCurrentVersion pgtype.Int4 `json:"expected_current_version"`
 }
 
 type WorkflowRun struct {

@@ -1,5 +1,7 @@
 # Autopilots
 
+For immutable TypeScript DAGs with workflow run history, see [Workflows](workflows.md). Autopilots continue to dispatch an issue or a direct agent task using their existing rule model.
+
 An autopilot is not an agent. It is a rule that dispatches work to an agent, or
 to a squad's leader agent.
 

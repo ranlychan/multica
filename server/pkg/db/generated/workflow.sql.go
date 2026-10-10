@@ -262,8 +262,8 @@ func (q *Queries) CompleteWorkflowOperation(ctx context.Context, arg CompleteWor
 }
 
 const createWorkflow = `-- name: CreateWorkflow :one
-INSERT INTO workflow(workspace_id,project_id,name,slug,description,hatchet_name,default_agent_id,created_by_type,created_by_id)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id, workspace_id, project_id, name, slug, description, hatchet_name, current_revision_id, definition_version, status, default_agent_id, created_by_type, created_by_id, last_run_at, created_at, updated_at
+INSERT INTO workflow(workspace_id,project_id,name,slug,description,hatchet_name,default_agent_id,created_by_type,created_by_id,audit_actor_type,audit_actor_id)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id, workspace_id, project_id, name, slug, description, hatchet_name, current_revision_id, definition_version, status, default_agent_id, created_by_type, created_by_id, last_run_at, created_at, updated_at, audit_actor_type, audit_actor_id
 `
 
 type CreateWorkflowParams struct {
@@ -276,6 +276,8 @@ type CreateWorkflowParams struct {
 	DefaultAgentID pgtype.UUID `json:"default_agent_id"`
 	CreatedByType  string      `json:"created_by_type"`
 	CreatedByID    pgtype.UUID `json:"created_by_id"`
+	AuditActorType pgtype.Text `json:"audit_actor_type"`
+	AuditActorID   pgtype.UUID `json:"audit_actor_id"`
 }
 
 func (q *Queries) CreateWorkflow(ctx context.Context, arg CreateWorkflowParams) (Workflow, error) {
@@ -289,6 +291,8 @@ func (q *Queries) CreateWorkflow(ctx context.Context, arg CreateWorkflowParams) 
 		arg.DefaultAgentID,
 		arg.CreatedByType,
 		arg.CreatedByID,
+		arg.AuditActorType,
+		arg.AuditActorID,
 	)
 	var i Workflow
 	err := row.Scan(
@@ -308,6 +312,8 @@ func (q *Queries) CreateWorkflow(ctx context.Context, arg CreateWorkflowParams) 
 		&i.LastRunAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.AuditActorType,
+		&i.AuditActorID,
 	)
 	return i, err
 }
@@ -387,19 +393,22 @@ func (q *Queries) CreateWorkflowOperation(ctx context.Context, arg CreateWorkflo
 }
 
 const createWorkflowRevision = `-- name: CreateWorkflowRevision :one
-INSERT INTO workflow_revision(workspace_id,workflow_id,version,definition,definition_hash,definition_graph,hatchet_name,created_by_id)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, workspace_id, workflow_id, version, definition, definition_language, definition_hash, definition_graph, hatchet_name, validation_status, validation_error, published_at, created_by_id, created_at
+INSERT INTO workflow_revision(workspace_id,workflow_id,version,definition,definition_hash,definition_graph,hatchet_name,created_by_id,audit_actor_type,audit_actor_id,expected_current_version)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id, workspace_id, workflow_id, version, definition, definition_language, definition_hash, definition_graph, hatchet_name, validation_status, validation_error, published_at, created_by_id, created_at, audit_actor_type, audit_actor_id, expected_current_version
 `
 
 type CreateWorkflowRevisionParams struct {
-	WorkspaceID     pgtype.UUID `json:"workspace_id"`
-	WorkflowID      pgtype.UUID `json:"workflow_id"`
-	Version         int32       `json:"version"`
-	Definition      string      `json:"definition"`
-	DefinitionHash  string      `json:"definition_hash"`
-	DefinitionGraph []byte      `json:"definition_graph"`
-	HatchetName     string      `json:"hatchet_name"`
-	CreatedByID     pgtype.UUID `json:"created_by_id"`
+	WorkspaceID            pgtype.UUID `json:"workspace_id"`
+	WorkflowID             pgtype.UUID `json:"workflow_id"`
+	Version                int32       `json:"version"`
+	Definition             string      `json:"definition"`
+	DefinitionHash         string      `json:"definition_hash"`
+	DefinitionGraph        []byte      `json:"definition_graph"`
+	HatchetName            string      `json:"hatchet_name"`
+	CreatedByID            pgtype.UUID `json:"created_by_id"`
+	AuditActorType         pgtype.Text `json:"audit_actor_type"`
+	AuditActorID           pgtype.UUID `json:"audit_actor_id"`
+	ExpectedCurrentVersion pgtype.Int4 `json:"expected_current_version"`
 }
 
 func (q *Queries) CreateWorkflowRevision(ctx context.Context, arg CreateWorkflowRevisionParams) (WorkflowRevision, error) {
@@ -412,6 +421,9 @@ func (q *Queries) CreateWorkflowRevision(ctx context.Context, arg CreateWorkflow
 		arg.DefinitionGraph,
 		arg.HatchetName,
 		arg.CreatedByID,
+		arg.AuditActorType,
+		arg.AuditActorID,
+		arg.ExpectedCurrentVersion,
 	)
 	var i WorkflowRevision
 	err := row.Scan(
@@ -429,6 +441,9 @@ func (q *Queries) CreateWorkflowRevision(ctx context.Context, arg CreateWorkflow
 		&i.PublishedAt,
 		&i.CreatedByID,
 		&i.CreatedAt,
+		&i.AuditActorType,
+		&i.AuditActorID,
+		&i.ExpectedCurrentVersion,
 	)
 	return i, err
 }
@@ -888,7 +903,7 @@ func (q *Queries) GetWorkflowHatchetTenant(ctx context.Context, workspaceID pgty
 }
 
 const getWorkflowInWorkspace = `-- name: GetWorkflowInWorkspace :one
-SELECT id, workspace_id, project_id, name, slug, description, hatchet_name, current_revision_id, definition_version, status, default_agent_id, created_by_type, created_by_id, last_run_at, created_at, updated_at FROM workflow WHERE id=$1 AND workspace_id=$2
+SELECT id, workspace_id, project_id, name, slug, description, hatchet_name, current_revision_id, definition_version, status, default_agent_id, created_by_type, created_by_id, last_run_at, created_at, updated_at, audit_actor_type, audit_actor_id FROM workflow WHERE id=$1 AND workspace_id=$2
 `
 
 type GetWorkflowInWorkspaceParams struct {
@@ -916,6 +931,8 @@ func (q *Queries) GetWorkflowInWorkspace(ctx context.Context, arg GetWorkflowInW
 		&i.LastRunAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.AuditActorType,
+		&i.AuditActorID,
 	)
 	return i, err
 }
@@ -958,7 +975,7 @@ func (q *Queries) GetWorkflowOperation(ctx context.Context, arg GetWorkflowOpera
 }
 
 const getWorkflowRevisionInWorkspace = `-- name: GetWorkflowRevisionInWorkspace :one
-SELECT id, workspace_id, workflow_id, version, definition, definition_language, definition_hash, definition_graph, hatchet_name, validation_status, validation_error, published_at, created_by_id, created_at FROM workflow_revision WHERE id=$1 AND workspace_id=$2
+SELECT id, workspace_id, workflow_id, version, definition, definition_language, definition_hash, definition_graph, hatchet_name, validation_status, validation_error, published_at, created_by_id, created_at, audit_actor_type, audit_actor_id, expected_current_version FROM workflow_revision WHERE id=$1 AND workspace_id=$2
 `
 
 type GetWorkflowRevisionInWorkspaceParams struct {
@@ -984,6 +1001,9 @@ func (q *Queries) GetWorkflowRevisionInWorkspace(ctx context.Context, arg GetWor
 		&i.PublishedAt,
 		&i.CreatedByID,
 		&i.CreatedAt,
+		&i.AuditActorType,
+		&i.AuditActorID,
+		&i.ExpectedCurrentVersion,
 	)
 	return i, err
 }
@@ -1220,7 +1240,7 @@ func (q *Queries) ListWorkflowHatchetTenantDeletions(ctx context.Context, limit 
 }
 
 const listWorkflowRevisions = `-- name: ListWorkflowRevisions :many
-SELECT id, workspace_id, workflow_id, version, definition, definition_language, definition_hash, definition_graph, hatchet_name, validation_status, validation_error, published_at, created_by_id, created_at FROM workflow_revision WHERE workflow_id=$1 AND workspace_id=$2 ORDER BY version DESC
+SELECT id, workspace_id, workflow_id, version, definition, definition_language, definition_hash, definition_graph, hatchet_name, validation_status, validation_error, published_at, created_by_id, created_at, audit_actor_type, audit_actor_id, expected_current_version FROM workflow_revision WHERE workflow_id=$1 AND workspace_id=$2 ORDER BY version DESC
 `
 
 type ListWorkflowRevisionsParams struct {
@@ -1252,6 +1272,63 @@ func (q *Queries) ListWorkflowRevisions(ctx context.Context, arg ListWorkflowRev
 			&i.PublishedAt,
 			&i.CreatedByID,
 			&i.CreatedAt,
+			&i.AuditActorType,
+			&i.AuditActorID,
+			&i.ExpectedCurrentVersion,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listWorkflowRevisionsPage = `-- name: ListWorkflowRevisionsPage :many
+SELECT id, workspace_id, workflow_id, version, definition, definition_language, definition_hash, definition_graph, hatchet_name, validation_status, validation_error, published_at, created_by_id, created_at, audit_actor_type, audit_actor_id, expected_current_version FROM workflow_revision WHERE workflow_id=$1 AND workspace_id=$2 ORDER BY version DESC LIMIT $3 OFFSET $4
+`
+
+type ListWorkflowRevisionsPageParams struct {
+	WorkflowID  pgtype.UUID `json:"workflow_id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	Limit       int32       `json:"limit"`
+	Offset      int32       `json:"offset"`
+}
+
+func (q *Queries) ListWorkflowRevisionsPage(ctx context.Context, arg ListWorkflowRevisionsPageParams) ([]WorkflowRevision, error) {
+	rows, err := q.db.Query(ctx, listWorkflowRevisionsPage,
+		arg.WorkflowID,
+		arg.WorkspaceID,
+		arg.Limit,
+		arg.Offset,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []WorkflowRevision{}
+	for rows.Next() {
+		var i WorkflowRevision
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.WorkflowID,
+			&i.Version,
+			&i.Definition,
+			&i.DefinitionLanguage,
+			&i.DefinitionHash,
+			&i.DefinitionGraph,
+			&i.HatchetName,
+			&i.ValidationStatus,
+			&i.ValidationError,
+			&i.PublishedAt,
+			&i.CreatedByID,
+			&i.CreatedAt,
+			&i.AuditActorType,
+			&i.AuditActorID,
+			&i.ExpectedCurrentVersion,
 		); err != nil {
 			return nil, err
 		}
@@ -1434,7 +1511,7 @@ func (q *Queries) ListWorkflowTriggers(ctx context.Context, arg ListWorkflowTrig
 }
 
 const listWorkflows = `-- name: ListWorkflows :many
-SELECT id, workspace_id, project_id, name, slug, description, hatchet_name, current_revision_id, definition_version, status, default_agent_id, created_by_type, created_by_id, last_run_at, created_at, updated_at FROM workflow WHERE workspace_id=$1 ORDER BY created_at DESC
+SELECT id, workspace_id, project_id, name, slug, description, hatchet_name, current_revision_id, definition_version, status, default_agent_id, created_by_type, created_by_id, last_run_at, created_at, updated_at, audit_actor_type, audit_actor_id FROM workflow WHERE workspace_id=$1 ORDER BY created_at DESC
 `
 
 // Every resource lookup and mutation carries workspace scope. Global scans are scheduler-only.
@@ -1464,6 +1541,57 @@ func (q *Queries) ListWorkflows(ctx context.Context, workspaceID pgtype.UUID) ([
 			&i.LastRunAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.AuditActorType,
+			&i.AuditActorID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listWorkflowsPage = `-- name: ListWorkflowsPage :many
+SELECT id, workspace_id, project_id, name, slug, description, hatchet_name, current_revision_id, definition_version, status, default_agent_id, created_by_type, created_by_id, last_run_at, created_at, updated_at, audit_actor_type, audit_actor_id FROM workflow WHERE workspace_id=$1 ORDER BY created_at DESC,id DESC LIMIT $2 OFFSET $3
+`
+
+type ListWorkflowsPageParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	Limit       int32       `json:"limit"`
+	Offset      int32       `json:"offset"`
+}
+
+func (q *Queries) ListWorkflowsPage(ctx context.Context, arg ListWorkflowsPageParams) ([]Workflow, error) {
+	rows, err := q.db.Query(ctx, listWorkflowsPage, arg.WorkspaceID, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Workflow{}
+	for rows.Next() {
+		var i Workflow
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.ProjectID,
+			&i.Name,
+			&i.Slug,
+			&i.Description,
+			&i.HatchetName,
+			&i.CurrentRevisionID,
+			&i.DefinitionVersion,
+			&i.Status,
+			&i.DefaultAgentID,
+			&i.CreatedByType,
+			&i.CreatedByID,
+			&i.LastRunAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.AuditActorType,
+			&i.AuditActorID,
 		); err != nil {
 			return nil, err
 		}
@@ -1526,7 +1654,7 @@ func (q *Queries) LockDueWorkflowTriggers(ctx context.Context, arg LockDueWorkfl
 }
 
 const lockWorkflowForUpdate = `-- name: LockWorkflowForUpdate :one
-SELECT id, workspace_id, project_id, name, slug, description, hatchet_name, current_revision_id, definition_version, status, default_agent_id, created_by_type, created_by_id, last_run_at, created_at, updated_at FROM workflow WHERE id=$1 AND workspace_id=$2 FOR UPDATE
+SELECT id, workspace_id, project_id, name, slug, description, hatchet_name, current_revision_id, definition_version, status, default_agent_id, created_by_type, created_by_id, last_run_at, created_at, updated_at, audit_actor_type, audit_actor_id FROM workflow WHERE id=$1 AND workspace_id=$2 FOR UPDATE
 `
 
 type LockWorkflowForUpdateParams struct {
@@ -1554,6 +1682,8 @@ func (q *Queries) LockWorkflowForUpdate(ctx context.Context, arg LockWorkflowFor
 		&i.LastRunAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.AuditActorType,
+		&i.AuditActorID,
 	)
 	return i, err
 }
@@ -1614,7 +1744,7 @@ UPDATE workflow w SET current_revision_id=r.id,definition_version=r.version,upda
 FROM workflow_revision r
 WHERE w.id=$1 AND w.workspace_id=$2 AND w.definition_version=$3
 AND r.id=$4 AND r.workspace_id=w.workspace_id AND r.workflow_id=w.id AND r.validation_status='valid'
-AND r.version>w.definition_version RETURNING w.id, w.workspace_id, w.project_id, w.name, w.slug, w.description, w.hatchet_name, w.current_revision_id, w.definition_version, w.status, w.default_agent_id, w.created_by_type, w.created_by_id, w.last_run_at, w.created_at, w.updated_at
+AND r.version>w.definition_version RETURNING w.id, w.workspace_id, w.project_id, w.name, w.slug, w.description, w.hatchet_name, w.current_revision_id, w.definition_version, w.status, w.default_agent_id, w.created_by_type, w.created_by_id, w.last_run_at, w.created_at, w.updated_at, w.audit_actor_type, w.audit_actor_id
 `
 
 type PublishWorkflowRevisionCASParams struct {
@@ -1649,6 +1779,8 @@ func (q *Queries) PublishWorkflowRevisionCAS(ctx context.Context, arg PublishWor
 		&i.LastRunAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.AuditActorType,
+		&i.AuditActorID,
 	)
 	return i, err
 }
@@ -1661,6 +1793,35 @@ WHERE workspace_id=$1 AND deletion_state='active'
 func (q *Queries) QueueWorkflowHatchetTenantDeletion(ctx context.Context, workspaceID pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, queueWorkflowHatchetTenantDeletion, workspaceID)
 	return err
+}
+
+const resolveWorkflowIngressToken = `-- name: ResolveWorkflowIngressToken :one
+SELECT id, workspace_id, workflow_id, kind, principal_user_id, enabled, cron_expression, timezone, next_run_at, input_template, label, last_fired_at, token_hash, created_by_type, created_by_id, created_at, updated_at FROM workflow_trigger WHERE token_hash=$1 AND kind='api' AND enabled
+`
+
+func (q *Queries) ResolveWorkflowIngressToken(ctx context.Context, tokenHash pgtype.Text) (WorkflowTrigger, error) {
+	row := q.db.QueryRow(ctx, resolveWorkflowIngressToken, tokenHash)
+	var i WorkflowTrigger
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.WorkflowID,
+		&i.Kind,
+		&i.PrincipalUserID,
+		&i.Enabled,
+		&i.CronExpression,
+		&i.Timezone,
+		&i.NextRunAt,
+		&i.InputTemplate,
+		&i.Label,
+		&i.LastFiredAt,
+		&i.TokenHash,
+		&i.CreatedByType,
+		&i.CreatedByID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const revokeWorkflowRunnerTokens = `-- name: RevokeWorkflowRunnerTokens :exec
@@ -1713,7 +1874,7 @@ func (q *Queries) RotateWorkflowTriggerToken(ctx context.Context, arg RotateWork
 }
 
 const setWorkflowRevisionValidation = `-- name: SetWorkflowRevisionValidation :one
-UPDATE workflow_revision SET validation_status=$3,validation_error=$4 WHERE id=$1 AND workspace_id=$2 RETURNING id, workspace_id, workflow_id, version, definition, definition_language, definition_hash, definition_graph, hatchet_name, validation_status, validation_error, published_at, created_by_id, created_at
+UPDATE workflow_revision SET validation_status=$3,validation_error=$4 WHERE id=$1 AND workspace_id=$2 RETURNING id, workspace_id, workflow_id, version, definition, definition_language, definition_hash, definition_graph, hatchet_name, validation_status, validation_error, published_at, created_by_id, created_at, audit_actor_type, audit_actor_id, expected_current_version
 `
 
 type SetWorkflowRevisionValidationParams struct {
@@ -1746,6 +1907,9 @@ func (q *Queries) SetWorkflowRevisionValidation(ctx context.Context, arg SetWork
 		&i.PublishedAt,
 		&i.CreatedByID,
 		&i.CreatedAt,
+		&i.AuditActorType,
+		&i.AuditActorID,
+		&i.ExpectedCurrentVersion,
 	)
 	return i, err
 }
@@ -1766,7 +1930,7 @@ func (q *Queries) TouchWorkflowRunnerToken(ctx context.Context, arg TouchWorkflo
 
 const updateWorkflowCAS = `-- name: UpdateWorkflowCAS :one
 UPDATE workflow SET name=$3,slug=$4,description=$5,project_id=$6,default_agent_id=$7,status=$8,updated_at=now()
-WHERE id=$1 AND workspace_id=$2 AND updated_at=$9 RETURNING id, workspace_id, project_id, name, slug, description, hatchet_name, current_revision_id, definition_version, status, default_agent_id, created_by_type, created_by_id, last_run_at, created_at, updated_at
+WHERE id=$1 AND workspace_id=$2 AND updated_at=$9 RETURNING id, workspace_id, project_id, name, slug, description, hatchet_name, current_revision_id, definition_version, status, default_agent_id, created_by_type, created_by_id, last_run_at, created_at, updated_at, audit_actor_type, audit_actor_id
 `
 
 type UpdateWorkflowCASParams struct {
@@ -1811,6 +1975,8 @@ func (q *Queries) UpdateWorkflowCAS(ctx context.Context, arg UpdateWorkflowCASPa
 		&i.LastRunAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.AuditActorType,
+		&i.AuditActorID,
 	)
 	return i, err
 }

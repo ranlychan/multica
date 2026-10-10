@@ -46,7 +46,7 @@ func TestWorkflowDurableContracts(t *testing.T) {
 	sort.Strings(files)
 	var applied []string
 	for _, file := range files {
-		if filepath.Base(file) < "564_" || filepath.Base(file) >= "591_" {
+		if filepath.Base(file) < "564_" || filepath.Base(file) >= "592_" {
 			continue
 		}
 		b, err := os.ReadFile(file)
@@ -70,6 +70,9 @@ func TestWorkflowDurableContracts(t *testing.T) {
 		exec(fmt.Sprintf("INSERT INTO workflow_revision(id,workspace_id,workflow_id,version,definition,definition_hash,definition_graph,hatchet_name,created_by_id) VALUES ('%s','%s','%s',1,'source','hash','{}','engine-v1','%s')", rev, ws, wf, principal))
 		reject(fmt.Sprintf("UPDATE workflow_revision SET definition='changed' WHERE id='%s'", rev))
 		reject(fmt.Sprintf("UPDATE workflow_revision SET hatchet_name='changed' WHERE id='%s'", rev))
+		reject(fmt.Sprintf("UPDATE workflow_revision SET expected_current_version=0 WHERE id='%s'", rev))
+		reject(fmt.Sprintf("UPDATE workflow_revision SET audit_actor_id=gen_random_uuid() WHERE id='%s'", rev))
+		reject(fmt.Sprintf("UPDATE workflow SET created_by_id=gen_random_uuid() WHERE id='%s'", wf))
 		reject(fmt.Sprintf("INSERT INTO workflow_revision(workspace_id,workflow_id,version,definition,definition_hash,definition_graph,hatchet_name,created_by_id) VALUES ('%s','%s',1,'other','other','{}','other','%s')", ws, wf, principal))
 		reject(fmt.Sprintf("INSERT INTO workflow_revision(workspace_id,workflow_id,version,definition,definition_hash,definition_graph,hatchet_name,created_by_id) VALUES ('%s','%s',0,'other','other','{}','other','%s')", ws, wf, principal))
 		exec(fmt.Sprintf("INSERT INTO workflow_revision(workspace_id,workflow_id,version,definition,definition_hash,definition_graph,hatchet_name,created_by_id) VALUES ('%s','%s',3,'new','new','{}','engine-v3','%s')", ws, wf, principal))

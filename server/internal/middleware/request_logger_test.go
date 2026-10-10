@@ -173,6 +173,15 @@ func TestRequestLogger_RedactsWebhookTokenInPath(t *testing.T) {
 	}
 }
 
+func TestWorkflowIngressLoggerRedactsBearer(t *testing.T) {
+	logs := withCapturedLogs(t)
+	handler := RequestLogger(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusAccepted) }))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/api/workflow-triggers/wft_secret", nil))
+	if strings.Contains(logs.String(), "wft_secret") {
+		t.Fatal("workflow bearer leaked")
+	}
+}
+
 func TestRequestLogger_IncludesWebhookTriggerIDFromContext(t *testing.T) {
 	// Exercise the real production flow: the webhook handler resolves the
 	// trigger, then calls SetWebhookTriggerID(r, ...) which mutates *r in

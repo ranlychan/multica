@@ -201,6 +201,7 @@ type RuntimeRecoveryNotifier interface {
 }
 
 type Handler struct {
+	WorkflowSvc            *service.WorkflowService
 	Queries                *db.Queries
 	ReadSelector           *dbreader.Selector
 	DB                     dbExecutor
@@ -481,6 +482,7 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 	// a disabled client, which turns the feature off rather than failing.
 	taskSvc.QuickActions = llmClient
 	h := &Handler{
+		WorkflowSvc:                  service.NewWorkflowService(queries, txStarter),
 		Queries:                      queries,
 		ReadSelector:                 dbreader.NewPrimaryOnly(queries),
 		DB:                           executor,

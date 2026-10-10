@@ -55,6 +55,9 @@ const webhookIngressPathPrefix = "/api/webhooks/autopilots/"
 // only credential gating the route. Without redaction, every successful
 // delivery prints a replayable URL into the structured log stream.
 func redactWebhookPath(path string) string {
+	if strings.HasPrefix(path, "/api/workflow-triggers/") {
+		return "/api/workflow-triggers/[redacted]"
+	}
 	if !strings.HasPrefix(path, webhookIngressPathPrefix) {
 		return path
 	}
