@@ -22,6 +22,8 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *;
 SELECT * FROM workflow_revision WHERE id=$1 AND workspace_id=$2;
 -- name: ListWorkflowRevisions :many
 SELECT * FROM workflow_revision WHERE workflow_id=$1 AND workspace_id=$2 ORDER BY version DESC;
+-- name: LatestWorkflowRevisionVersion :one
+SELECT COALESCE(MAX(version),0)::integer FROM workflow_revision WHERE workflow_id=$1 AND workspace_id=$2;
 -- name: ListWorkflowRevisionsPage :many
 SELECT * FROM workflow_revision WHERE workflow_id=$1 AND workspace_id=$2 ORDER BY version DESC LIMIT $3 OFFSET $4;
 -- name: SetWorkflowRevisionValidation :one
@@ -76,6 +78,7 @@ SELECT * FROM workflow_run WHERE workspace_id=$1 AND status IN ('queued','submit
 -- name: BeginWorkflowRunSubmission :one
 UPDATE workflow_run SET status='submitting',submission_started_at=$3,submission_deadline=$4
 WHERE id=$1 AND workspace_id=$2 AND status='queued' AND submission_started_at IS NULL
+AND cancel_requested_at IS NULL
 AND $3::timestamptz IS NOT NULL AND $4::timestamptz IS NOT NULL AND $4::timestamptz>$3::timestamptz RETURNING *;
 -- name: AcknowledgeWorkflowRun :one
 UPDATE workflow_run SET status='running',hatchet_run_id=$3,started_at=now()
@@ -84,6 +87,9 @@ WHERE id=$1 AND workspace_id=$2 AND status='submitting' RETURNING *;
 UPDATE workflow_run SET status=$3,output=$4,reason_code=$5,failure_reason=$6,finished_at=now()
 WHERE id=$1 AND workspace_id=$2 AND status=$7 AND status IN ('queued','submitting','running')
 AND $3::text IN ('completed','failed','cancelled','skipped') RETURNING *;
+-- name: RequestWorkflowRunCancellation :one
+UPDATE workflow_run SET cancel_requested_at=now(),cancel_requested_by_id=$3
+WHERE id=$1 AND workspace_id=$2 AND status IN ('queued','submitting','running') AND cancel_requested_at IS NULL RETURNING *;
 -- name: CreateWorkflowRunnerToken :one
 INSERT INTO workflow_runner_token(workspace_id,daemon_id,token_hash,label,created_by_id,expires_at)
 VALUES($1,$2,$3,$4,$5,$6) RETURNING *;

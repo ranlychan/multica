@@ -294,7 +294,7 @@ func (h *Handler) UpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 			entity.DefaultAgentID = parsed
 		}
 	}
-	if strings.TrimSpace(entity.Name) == "" || len(entity.Name) > 200 || len(entity.Slug) == 0 || len(entity.Slug) > 100 || len(entity.Description.String) > 4096 || (entity.Status != "active" && entity.Status != "paused" && entity.Status != "archived") {
+	if strings.TrimSpace(entity.Name) == "" || len(entity.Name) > 200 || !service.ValidWorkflowSlug(entity.Slug) || len(entity.Description.String) > 4096 || (entity.Status != "active" && entity.Status != "paused" && entity.Status != "archived") {
 		workflowAPIError(w, workflowFail("workflow_invalid_input"))
 		return
 	}
@@ -672,7 +672,7 @@ func (h *Handler) RotateWorkflowTriggerToken(w http.ResponseWriter, r *http.Requ
 
 // Run views expose local product state; raw engine JSON and credentials never cross this boundary.
 func workflowRunView(run db.WorkflowRun) map[string]any {
-	return map[string]any{"id": run.ID, "workspace_id": run.WorkspaceID, "workflow_id": run.WorkflowID, "revision_id": run.RevisionID, "principal_user_id": run.PrincipalUserID, "source": run.Source, "status": run.Status, "reason_code": run.ReasonCode, "triggered_at": run.TriggeredAt, "started_at": run.StartedAt, "finished_at": run.FinishedAt}
+	return map[string]any{"id": run.ID, "workspace_id": run.WorkspaceID, "workflow_id": run.WorkflowID, "revision_id": run.RevisionID, "principal_user_id": run.PrincipalUserID, "source": run.Source, "status": run.Status, "reason_code": run.ReasonCode, "triggered_at": run.TriggeredAt, "started_at": run.StartedAt, "finished_at": run.FinishedAt, "cancel_requested_at": run.CancelRequestedAt}
 }
 func (h *Handler) workflowRun(w http.ResponseWriter, r *http.Request, entity db.Workflow) (db.WorkflowRun, bool) {
 	id, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "runId"), "runId")
@@ -713,7 +713,9 @@ func (h *Handler) GetWorkflowRun(w http.ResponseWriter, r *http.Request) {
 	}
 	run, ok := h.workflowRun(w, r, entity)
 	if ok {
-		writeJSON(w, 200, workflowRunView(run))
+		view := workflowRunView(run)
+		view["input"] = service.SanitizeWorkflowInput(run.Input)
+		writeJSON(w, 200, view)
 	}
 }
 func (h *Handler) WorkflowRunLogs(w http.ResponseWriter, r *http.Request) {

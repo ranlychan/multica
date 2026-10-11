@@ -3,11 +3,14 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/testutil"
 	"github.com/multica-ai/multica/server/internal/util"
@@ -147,8 +150,9 @@ func TestWorkflowDeferredPublishCASAndAuthority(t *testing.T) {
 		t.Fatal("editor may grant access")
 	}
 	run, e := svc.AdmitRun(ctx, current, a, "manual", pgtype.UUID{}, json.RawMessage(`{"secret":"value"}`))
-	if e != nil {
-		t.Fatal(e)
+	var unavailable *WorkflowError
+	if !errors.As(e, &unavailable) || unavailable.Code != "workflow_engine_unavailable" {
+		t.Fatalf("disabled runtime must return unavailable, got %v", e)
 	}
 	fx.Cleanup(t, "DELETE FROM workflow_run WHERE id=$1", run.ID)
 	if run.Status != "skipped" || run.ReasonCode.String != "workflow_engine_unavailable" {
@@ -157,5 +161,101 @@ func TestWorkflowDeferredPublishCASAndAuthority(t *testing.T) {
 	cancelled, e := svc.Cancel(ctx, current, a, run.ID)
 	if e != nil || cancelled.Status != "skipped" {
 		t.Fatal("terminal cancel not idempotent")
+	}
+}
+
+func TestWorkflowCancelRetainsReconcilableStateAndLateAcknowledgement(t *testing.T) {
+	pool := sharedTestPool(t)
+	ctx := context.Background()
+	fx := testutil.New(pool, "", "")
+	human := fx.Insert(t, "user", testutil.Cols{"name": "cancel human", "email": uuid.NewString() + "@test.invalid"})
+	ws := fx.Insert(t, "workspace", testutil.Cols{"name": "cancel test", "slug": uuid.NewString()})
+	fx.Insert(t, "member", testutil.Cols{"workspace_id": ws, "user_id": human, "role": "member"})
+	wsID, _ := util.ParseUUID(ws)
+	humanID, _ := util.ParseUUID(human)
+	a := WorkflowActor{HumanID: humanID, AuditType: "member", AuditID: humanID}
+	svc := NewWorkflowService(db.New(pool), pool)
+	w, e := svc.Create(ctx, wsID, a, "cancel", "cancel", "")
+	if e != nil {
+		t.Fatal(e)
+	}
+	fx.Cleanup(t, "DELETE FROM workflow WHERE id=$1", w.ID)
+	for _, state := range []string{"queued", "submitting", "running"} {
+		t.Run(state, func(t *testing.T) {
+			id := uuid.NewString()
+			cols := testutil.Cols{"id": id, "workspace_id": ws, "workflow_id": w.ID, "revision_id": uuid.NewString(), "definition_hash": "hash", "principal_user_id": human, "source": "manual", "status": state, "idempotency_key": id, "input": "{}"}
+			if state != "queued" {
+				cols["submission_started_at"] = time.Now().Add(-time.Minute)
+				cols["submission_deadline"] = time.Now().Add(time.Minute)
+			}
+			if state == "running" {
+				cols["hatchet_run_id"] = uuid.NewString()
+			}
+			fx.Insert(t, "workflow_run", cols)
+			runID, _ := util.ParseUUID(id)
+			first, e := svc.Cancel(ctx, w, a, runID)
+			if e != nil {
+				t.Fatal(e)
+			}
+			if first.Status != state || first.FinishedAt.Valid {
+				t.Fatalf("cancel froze reconcilable %s run: %+v", state, first)
+			}
+			var requested time.Time
+			fx.QueryRow(t, "SELECT cancel_requested_at FROM workflow_run WHERE id=$1", runID).Scan(&requested)
+			if _, e = svc.Cancel(ctx, w, a, runID); e != nil {
+				t.Fatal(e)
+			}
+			var again time.Time
+			fx.QueryRow(t, "SELECT cancel_requested_at FROM workflow_run WHERE id=$1", runID).Scan(&again)
+			if !requested.Equal(again) {
+				t.Fatal("cancel request was rewritten")
+			}
+			rows, e := svc.Queries.ListWorkflowRunsToReconcile(ctx, db.ListWorkflowRunsToReconcileParams{WorkspaceID: wsID, Limit: 100})
+			if e != nil {
+				t.Fatal(e)
+			}
+			found := false
+			for _, row := range rows {
+				if row.ID == runID {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatal("cancel request lost from reconciliation")
+			}
+			if state == "queued" {
+				_, e = svc.Queries.BeginWorkflowRunSubmission(ctx, db.BeginWorkflowRunSubmissionParams{ID: runID, WorkspaceID: wsID, SubmissionStartedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true}, SubmissionDeadline: pgtype.Timestamptz{Time: time.Now().Add(time.Minute), Valid: true}})
+				if !errors.Is(e, pgx.ErrNoRows) {
+					t.Fatalf("cancelled queue could submit: %v", e)
+				}
+			}
+			if state == "submitting" {
+				engineID, _ := util.ParseUUID(uuid.NewString())
+				late, e := svc.Queries.AcknowledgeWorkflowRun(ctx, db.AcknowledgeWorkflowRunParams{ID: runID, WorkspaceID: wsID, HatchetRunID: engineID})
+				if e != nil || late.Status != "running" || late.HatchetRunID != engineID {
+					t.Fatalf("ambiguous submission cannot attach late ID: %+v %v", late, e)
+				}
+				if !late.CancelRequestedAt.Valid || late.CancelRequestedByID != humanID {
+					t.Fatal("late acknowledgment lost cancellation request")
+				}
+			}
+			if _, e = pool.Exec(ctx, "UPDATE workflow_run SET cancel_requested_at=NULL,cancel_requested_by_id=NULL WHERE id=$1", runID); e == nil {
+				t.Fatal("durable cancellation request could be cleared")
+			}
+			active, e := svc.Queries.GetWorkflowRunInWorkspace(ctx, db.GetWorkflowRunInWorkspaceParams{ID: runID, WorkspaceID: wsID})
+			if e != nil {
+				t.Fatal(e)
+			}
+			// Represents Task4's confirmed engine outcome (or confirmed no submission
+			// for queued runs), distinct from the author's cancellation request.
+			terminal, e := svc.Queries.FinishWorkflowRunCAS(ctx, db.FinishWorkflowRunCASParams{ID: runID, WorkspaceID: wsID, Status: "cancelled", Status_2: active.Status})
+			if e != nil || !terminal.FinishedAt.Valid || !terminal.CancelRequestedAt.Valid {
+				t.Fatalf("confirmed cancellation cannot finalize: %+v %v", terminal, e)
+			}
+			same, e := svc.Cancel(ctx, w, a, runID)
+			if e != nil || same.Status != "cancelled" || !same.FinishedAt.Time.Equal(terminal.FinishedAt.Time) {
+				t.Fatal("terminal cancel was rewritten")
+			}
+		})
 	}
 }

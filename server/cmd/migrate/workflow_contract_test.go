@@ -46,7 +46,7 @@ func TestWorkflowDurableContracts(t *testing.T) {
 	sort.Strings(files)
 	var applied []string
 	for _, file := range files {
-		if filepath.Base(file) < "564_" || filepath.Base(file) >= "592_" {
+		if filepath.Base(file) < "564_" || filepath.Base(file) >= "593_" {
 			continue
 		}
 		b, err := os.ReadFile(file)
@@ -221,15 +221,21 @@ func TestWorkflowDurableContracts(t *testing.T) {
 		}
 	})
 	t.Run("tenant deletion completion requires current claim", func(t *testing.T) {
+		// Claim eligibility uses PostgreSQL now(), so fixture leases must use the
+		// same clock rather than assuming the host and database clocks agree.
+		var expiredLease, futureLease pgtype.Timestamptz
+		if err := c.QueryRow(ctx, "SELECT now()-interval '1 minute', now()+interval '1 hour'").Scan(&expiredLease, &futureLease); err != nil {
+			t.Fatal(err)
+		}
 		for _, outcome := range []string{"failed", "deleted"} {
 			tenantWS := uuid.NewString()
 			exec(fmt.Sprintf("INSERT INTO workflow_hatchet_tenant(workspace_id,tenant_id,token_encrypted,deletion_state,next_deletion_attempt_at) VALUES ('%s','tenant','ciphertext','pending',now()-interval '1 minute')", tenantWS))
-			claimParams := db.ClaimWorkflowHatchetTenantDeletionParams{WorkspaceID: u(tenantWS), NextDeletionAttemptAt: pgtype.Timestamptz{Time: time.Now().Add(-time.Minute), Valid: true}}
+			claimParams := db.ClaimWorkflowHatchetTenantDeletionParams{WorkspaceID: u(tenantWS), NextDeletionAttemptAt: expiredLease}
 			a, err := q.ClaimWorkflowHatchetTenantDeletion(ctx, claimParams)
 			if err != nil {
 				t.Fatal(err)
 			}
-			claimParams.NextDeletionAttemptAt = pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true}
+			claimParams.NextDeletionAttemptAt = futureLease
 			b, err := q.ClaimWorkflowHatchetTenantDeletion(ctx, claimParams)
 			if err != nil {
 				t.Fatal(err)
@@ -237,7 +243,7 @@ func TestWorkflowDurableContracts(t *testing.T) {
 			if b.DeletionAttempts != a.DeletionAttempts+1 {
 				t.Fatal("reclaim did not advance generation")
 			}
-			finishParams := db.FinishWorkflowHatchetTenantDeletionParams{WorkspaceID: u(tenantWS), DeletionState: outcome, ExpectedAttempt: a.DeletionAttempts, NextDeletionAttemptAt: pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true}}
+			finishParams := db.FinishWorkflowHatchetTenantDeletionParams{WorkspaceID: u(tenantWS), DeletionState: outcome, ExpectedAttempt: a.DeletionAttempts, NextDeletionAttemptAt: futureLease}
 			_, err = q.FinishWorkflowHatchetTenantDeletion(ctx, finishParams)
 			if err != pgx.ErrNoRows {
 				t.Errorf("stale %s completion accepted: %v", outcome, err)

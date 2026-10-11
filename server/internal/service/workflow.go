@@ -90,6 +90,63 @@ func SanitizeWorkflowLogs(entries []WorkflowLogEntry) []WorkflowLogEntry {
 	return result
 }
 
+// SanitizeWorkflowInput projects bounded product input without known credential
+// fields. Oversized/deep historical rows fail closed rather than returning raw data.
+func SanitizeWorkflowInput(raw []byte) json.RawMessage {
+	if len(raw) == 0 {
+		return json.RawMessage(`null`)
+	}
+	if ValidateWorkflowPayload(raw) != nil {
+		return json.RawMessage(`{"_redacted":true}`)
+	}
+	var value any
+	decoder := json.NewDecoder(strings.NewReader(string(raw)))
+	decoder.UseNumber()
+	if decoder.Decode(&value) != nil {
+		return json.RawMessage(`{"_redacted":true}`)
+	}
+	var clean func(any) any
+	clean = func(v any) any {
+		switch x := v.(type) {
+		case map[string]any:
+			result := map[string]any{}
+			for key, child := range x {
+				normalized := strings.ToLower(key)
+				normalized = strings.NewReplacer("_", "", "-", "", " ", "").Replace(normalized)
+				safeKey := workflowLogSecrets.ReplaceAllString(key, "[redacted]")
+				sensitive := false
+				for _, part := range []string{"password", "secret", "token", "credential", "authorization", "cookie", "privatekey", "apikey", "hatchet", "tenantid"} {
+					if strings.Contains(normalized, part) {
+						sensitive = true
+						break
+					}
+				}
+				if sensitive {
+					result[safeKey] = "[redacted]"
+				} else {
+					result[safeKey] = clean(child)
+				}
+			}
+			return result
+		case []any:
+			result := make([]any, len(x))
+			for i, child := range x {
+				result[i] = clean(child)
+			}
+			return result
+		case string:
+			return workflowLogSecrets.ReplaceAllString(x, "[redacted]")
+		default:
+			return v
+		}
+	}
+	encoded, e := json.Marshal(clean(value))
+	if e != nil || len(encoded) > WorkflowMaxPayloadBytes {
+		return json.RawMessage(`{"_redacted":true}`)
+	}
+	return json.RawMessage(encoded)
+}
+
 func NewWorkflowService(q *db.Queries, tx TxStarter) *WorkflowService {
 	return &WorkflowService{Queries: q, TxStarter: tx}
 }
@@ -247,7 +304,7 @@ func (s *WorkflowService) Load(ctx context.Context, workspace, id pgtype.UUID) (
 }
 
 func (s *WorkflowService) Create(ctx context.Context, ws pgtype.UUID, a WorkflowActor, name, slug, description string) (db.Workflow, error) {
-	if strings.TrimSpace(name) == "" || len(name) > 200 || !workflowSlug(slug) || len(description) > 4096 {
+	if strings.TrimSpace(name) == "" || len(name) > 200 || !ValidWorkflowSlug(slug) || len(description) > 4096 {
 		return db.Workflow{}, workflowError("workflow_invalid_input")
 	}
 	if _, e := s.Queries.GetMemberByUserAndWorkspace(ctx, db.GetMemberByUserAndWorkspaceParams{WorkspaceID: ws, UserID: a.HumanID}); e != nil {
@@ -255,7 +312,9 @@ func (s *WorkflowService) Create(ctx context.Context, ws pgtype.UUID, a Workflow
 	}
 	return s.Queries.CreateWorkflow(ctx, db.CreateWorkflowParams{WorkspaceID: ws, Name: name, Slug: slug, Description: pgtype.Text{String: description, Valid: true}, HatchetName: "multica-" + uuid.NewString(), CreatedByType: "member", CreatedByID: a.HumanID, AuditActorType: pgtype.Text{String: a.AuditType, Valid: true}, AuditActorID: a.AuditID})
 }
-func workflowSlug(slug string) bool {
+
+// ValidWorkflowSlug is shared by create and update boundaries.
+func ValidWorkflowSlug(slug string) bool {
 	if len(slug) == 0 || len(slug) > 100 {
 		return false
 	}
@@ -304,14 +363,11 @@ func (s *WorkflowService) PublishRevision(ctx context.Context, ws, id pgtype.UUI
 	if w.DefinitionVersion != expected {
 		return result, workflowError("workflow_version_conflict")
 	}
-	revisions, e := q.ListWorkflowRevisions(ctx, db.ListWorkflowRevisionsParams{WorkflowID: id, WorkspaceID: ws})
+	latest, e := q.LatestWorkflowRevisionVersion(ctx, db.LatestWorkflowRevisionVersionParams{WorkflowID: id, WorkspaceID: ws})
 	if e != nil {
 		return result, e
 	}
-	version := int32(1)
-	if len(revisions) > 0 {
-		version = revisions[0].Version + 1
-	}
+	version := latest + 1
 	sum := sha256.Sum256([]byte(source))
 	hash := hex.EncodeToString(sum[:])
 	r, e := q.CreateWorkflowRevision(ctx, db.CreateWorkflowRevisionParams{WorkspaceID: ws, WorkflowID: id, Version: version, Definition: source, DefinitionHash: hash, DefinitionGraph: graph, HatchetName: fmt.Sprintf("multica-%s-v%d-%s", util.UUIDToString(id), version, hash[:12]), CreatedByID: a.HumanID, AuditActorType: pgtype.Text{String: a.AuditType, Valid: true}, AuditActorID: a.AuditID, ExpectedCurrentVersion: pgtype.Int4{Int32: expected, Valid: true}})
@@ -440,7 +496,13 @@ func (s *WorkflowService) AdmitRun(ctx context.Context, w db.Workflow, a Workflo
 	if e != nil {
 		return run, e
 	}
-	return run, tx.Commit(ctx)
+	if e = tx.Commit(ctx); e != nil {
+		return run, e
+	}
+	if state == "skipped" {
+		return run, workflowError("workflow_engine_unavailable")
+	}
+	return run, nil
 }
 
 func (s *WorkflowService) Cancel(ctx context.Context, w db.Workflow, a WorkflowActor, runID pgtype.UUID) (db.WorkflowRun, error) {
@@ -454,8 +516,9 @@ func (s *WorkflowService) Cancel(ctx context.Context, w db.Workflow, a WorkflowA
 	if run.Status == "completed" || run.Status == "failed" || run.Status == "cancelled" || run.Status == "skipped" {
 		return run, nil
 	}
-	// Running engine cancellation belongs to Task4; persist the local terminal intent first.
-	result, e := s.Queries.FinishWorkflowRunCAS(ctx, db.FinishWorkflowRunCASParams{ID: runID, WorkspaceID: w.WorkspaceID, Status: "cancelled", Status_2: run.Status, ReasonCode: pgtype.Text{String: "user_cancelled", Valid: true}})
+	// This row is the durable cancellation outbox. Keep it reconcilable, including
+	// ambiguous submissions awaiting a late engine ID; Task4 confirms the outcome.
+	result, e := s.Queries.RequestWorkflowRunCancellation(ctx, db.RequestWorkflowRunCancellationParams{ID: runID, WorkspaceID: w.WorkspaceID, CancelRequestedByID: a.HumanID})
 	if errors.Is(e, pgx.ErrNoRows) {
 		return s.Queries.GetWorkflowRunInWorkspace(ctx, db.GetWorkflowRunInWorkspaceParams{ID: runID, WorkspaceID: w.WorkspaceID})
 	}

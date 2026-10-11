@@ -1812,6 +1812,9 @@ type WorkflowRun struct {
 	FinishedAt          pgtype.Timestamptz `json:"finished_at"`
 	DurationMs          pgtype.Int8        `json:"duration_ms"`
 	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	// Durable cancellation outbox; retain active state until engine cancellation or terminal outcome is confirmed.
+	CancelRequestedAt   pgtype.Timestamptz `json:"cancel_requested_at"`
+	CancelRequestedByID pgtype.UUID        `json:"cancel_requested_by_id"`
 }
 
 type WorkflowRunnerToken struct {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/middleware"
 	"github.com/multica-ai/multica/server/internal/service"
@@ -36,6 +37,42 @@ func TestWorkflowHTTPMiddlewareRejectsForgedAgentIdentity(t *testing.T) {
 	dbfx.Cleanup(t, "DELETE FROM workflow WHERE id=$1", result.ID)
 	if result.CreatedByID != human || result.AuditType != "member" {
 		t.Fatal("forged agent headers accepted")
+	}
+}
+
+func TestWorkflowHTTPTaskTokenMiddlewareBindsActorWorkspaceAndCurrentOriginator(t *testing.T) {
+	human := plainMember(t, "workflow-token-human")
+	var agent string
+	dbfx.QueryRow(t, "SELECT id FROM agent WHERE workspace_id=$1 LIMIT 1", testWorkspaceID).Scan(&agent)
+	task := callerTask(t, agent, human)
+	token := "mat_" + uuid.NewString()
+	dbfx.Insert(t, "task_token", testutil.Cols{"token_hash": auth.HashToken(token), "task_id": task, "agent_id": agent, "workspace_id": testWorkspaceID, "user_id": testUserID, "expires_at": testutil.Raw("now()+interval '1 hour'")})
+	route := middleware.Auth(testHandler.Queries, nil, nil, nil)(middleware.RequireWorkspaceMember(testHandler.Queries)(http.HandlerFunc(testHandler.CreateWorkflow)))
+	request := func(slug string) *http.Request {
+		r := newRequest("POST", "/api/workflows?workspace_slug=forged", map[string]any{"name": "token workflow", "slug": slug})
+		r.Header.Set("Authorization", "Bearer "+token)
+		r.Header.Set("X-Workspace-ID", uuid.NewString())
+		r.Header.Set("X-Workspace-Slug", "forged")
+		r.Header.Set("X-Agent-ID", human)
+		r.Header.Set("X-Task-ID", uuid.NewString())
+		r.Header.Set("X-Actor-Source", "member")
+		return r
+	}
+	var result struct {
+		ID        string `json:"id"`
+		Creator   string `json:"created_by_id"`
+		Actor     string `json:"audit_actor_id"`
+		Workspace string `json:"workspace_id"`
+	}
+	testutil.Call(t, route.ServeHTTP, request("workflow-real-token")).Want(201).JSON(&result)
+	dbfx.Cleanup(t, "DELETE FROM workflow WHERE id=$1", result.ID)
+	if result.Creator != human || result.Actor != agent || result.Workspace != testWorkspaceID {
+		t.Fatal("task token binding or human resolution failed")
+	}
+	dbfx.Exec(t, "UPDATE agent_task_queue SET status='completed',completed_at=now() WHERE id=$1", task)
+	response := testutil.Call(t, route.ServeHTTP, request("workflow-real-token-terminal")).Want(403)
+	if response.Map()["code"] != "workflow_no_originator" {
+		t.Fatal(response.Text())
 	}
 }
 
@@ -91,8 +128,14 @@ func TestWorkflowHTTPAgentAuthorityTriggerIngressReplayAndRedaction(t *testing.T
 		Principal string `json:"principal_user_id"`
 		Status    string `json:"status"`
 	}
-	response := testutil.Call(t, testHandler.HandleWorkflowIngress, req).Want(202)
-	response.JSON(&run)
+	response := testutil.Call(t, testHandler.HandleWorkflowIngress, req).Want(503)
+	if response.Map()["code"] != "workflow_engine_unavailable" {
+		t.Fatal(response.Text())
+	}
+	var storedID string
+	dbfx.QueryRow(t, "SELECT id FROM workflow_run WHERE workflow_id=$1 ORDER BY triggered_at DESC LIMIT 1", created.ID).Scan(&storedID)
+	req = withURLParams(caller.request("GET", "/api/workflows/"+created.ID+"/runs/"+storedID, nil), "id", created.ID, "runId", storedID)
+	testutil.Call(t, testHandler.GetWorkflowRun, req).Want(200).JSON(&run)
 	if run.Principal != human || run.Status != "skipped" || strings.Contains(response.Text(), "dont leak") {
 		t.Fatal("ingress identity, admission or run redaction failed")
 	}
@@ -100,9 +143,22 @@ func TestWorkflowHTTPAgentAuthorityTriggerIngressReplayAndRedaction(t *testing.T
 	var replay struct {
 		ID string `json:"id"`
 	}
-	testutil.Call(t, testHandler.ReplayWorkflowRun, req).Want(202).JSON(&replay)
+	testutil.Call(t, testHandler.ReplayWorkflowRun, req).Want(503)
+	dbfx.QueryRow(t, "SELECT id FROM workflow_run WHERE workflow_id=$1 ORDER BY triggered_at DESC LIMIT 1", created.ID).Scan(&replay.ID)
 	if replay.ID == run.ID {
 		t.Fatal("replay reused run")
+	}
+	req = withURLParam(caller.request("POST", "/api/workflows/"+created.ID+"/run", map[string]any{"input": map[string]any{"password": "manual-secret", "ticket": "ABC-42"}}), "id", created.ID)
+	manual := testutil.Call(t, testHandler.RunWorkflow, req).Want(503)
+	if manual.Map()["code"] != "workflow_engine_unavailable" {
+		t.Fatal(manual.Text())
+	}
+	dbfx.QueryRow(t, "SELECT id FROM workflow_run WHERE workflow_id=$1 ORDER BY triggered_at DESC LIMIT 1", created.ID).Scan(&storedID)
+	req = withURLParams(caller.request("GET", "/api/workflows/"+created.ID+"/runs/"+storedID, nil), "id", created.ID, "runId", storedID)
+	detail := testutil.Call(t, testHandler.GetWorkflowRun, req).Want(200).Map()
+	input, ok := detail["input"].(map[string]any)
+	if !ok || input["ticket"] != "ABC-42" || input["password"] != "[redacted]" {
+		t.Fatalf("missing/redaction failure input view: %+v", detail)
 	}
 	for i := 0; i < 2; i++ {
 		req = withURLParams(caller.request("POST", "/api/workflows/"+created.ID+"/runs/"+run.ID+"/cancel", nil), "id", created.ID, "runId", run.ID)
@@ -134,6 +190,14 @@ func TestWorkflowHTTPCreatePendingAndCrossWorkspace(t *testing.T) {
 	dbfx.QueryRow(t, "SELECT id FROM agent WHERE workspace_id=$1 LIMIT 1", testWorkspaceID).Scan(&agent)
 	patch := withURLParam(newRequest("PATCH", "/api/workflows/"+created.ID, map[string]any{"name": "Updated Workflow", "expected_updated_at": created.UpdatedAt, "default_agent_id": agent}), "id", created.ID)
 	testutil.Call(t, testHandler.UpdateWorkflow, patch).Want(200)
+	var updated struct {
+		UpdatedAt time.Time `json:"updated_at"`
+	}
+	testutil.Call(t, testHandler.GetWorkflow, withURLParam(newRequest("GET", "/api/workflows/"+created.ID, nil), "id", created.ID)).Want(200).JSON(&updated)
+	for _, slug := range []string{"Upper", "with space", "has/slash"} {
+		patch = withURLParam(newRequest("PATCH", "/api/workflows/"+created.ID, map[string]any{"slug": slug, "expected_updated_at": updated.UpdatedAt}), "id", created.ID)
+		testutil.Call(t, testHandler.UpdateWorkflow, patch).Want(400)
+	}
 	req := newRequest("POST", "/api/workflows/"+created.ID+"/revisions?workspace_id="+testWorkspaceID, map[string]any{"expected_version": 0, "definition": "throw new Error('server must not evaluate')", "definition_graph": map[string]any{"steps": []any{map[string]any{"id": "one"}}}, "validated": true})
 	req = withURLParam(req, "id", created.ID)
 	testutil.Call(t, testHandler.PublishWorkflowRevision, req).Want(http.StatusBadRequest)
@@ -160,4 +224,27 @@ func TestWorkflowHTTPCreatePendingAndCrossWorkspace(t *testing.T) {
 	testutil.Call(t, testHandler.DeleteWorkflow, req).Want(204)
 	req = withURLParam(newRequest("GET", "/api/workflows/"+created.ID, nil), "id", created.ID)
 	testutil.Call(t, testHandler.GetWorkflow, req).Want(404)
+}
+
+func TestWorkflowHTTPDetailProjectsBoundedRedactedInput(t *testing.T) {
+	wf := dbfx.Insert(t, "workflow", testutil.Cols{"workspace_id": testWorkspaceID, "name": "input", "slug": "workflow-detail-input", "created_by_type": "member", "created_by_id": testUserID})
+	id := uuid.NewString()
+	dbfx.Insert(t, "workflow_run", testutil.Cols{"id": id, "workspace_id": testWorkspaceID, "workflow_id": wf, "revision_id": testUserID, "definition_hash": "hash", "principal_user_id": testUserID, "source": "manual", "idempotency_key": id, "input": `{"ticket":"ABC-42","password":"hidden","nested":[{"api_key":"key-hidden","count":3}],"note":"Bearer bearer-hidden"}`})
+	req := withURLParams(newRequest("GET", "/api/workflows/"+wf+"/runs/"+id, nil), "id", wf, "runId", id)
+	response := testutil.Call(t, testHandler.GetWorkflowRun, req).Want(200)
+	detail := response.Map()
+	input, ok := detail["input"].(map[string]any)
+	if !ok || input["ticket"] != "ABC-42" || input["password"] != "[redacted]" {
+		t.Fatalf("input missing or invalid: %+v", detail)
+	}
+	if strings.Contains(response.Text(), "hidden") {
+		t.Fatal("input secret leaked")
+	}
+	bigID := uuid.NewString()
+	dbfx.Insert(t, "workflow_run", testutil.Cols{"id": bigID, "workspace_id": testWorkspaceID, "workflow_id": wf, "revision_id": testUserID, "definition_hash": "hash", "principal_user_id": testUserID, "source": "manual", "idempotency_key": bigID, "input": `{"large":"` + strings.Repeat("x", service.WorkflowMaxPayloadBytes) + `"}`})
+	req = withURLParams(newRequest("GET", "/api/workflows/"+wf+"/runs/"+bigID, nil), "id", wf, "runId", bigID)
+	response = testutil.Call(t, testHandler.GetWorkflowRun, req).Want(200)
+	if len(response.Text()) > service.WorkflowMaxPayloadBytes+4096 {
+		t.Fatal("detail input unbounded")
+	}
 }

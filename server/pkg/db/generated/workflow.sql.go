@@ -13,7 +13,7 @@ import (
 
 const acknowledgeWorkflowRun = `-- name: AcknowledgeWorkflowRun :one
 UPDATE workflow_run SET status='running',hatchet_run_id=$3,started_at=now()
-WHERE id=$1 AND workspace_id=$2 AND status='submitting' RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at
+WHERE id=$1 AND workspace_id=$2 AND status='submitting' RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id
 `
 
 type AcknowledgeWorkflowRunParams struct {
@@ -54,6 +54,8 @@ func (q *Queries) AcknowledgeWorkflowRun(ctx context.Context, arg AcknowledgeWor
 		&i.FinishedAt,
 		&i.DurationMs,
 		&i.CreatedAt,
+		&i.CancelRequestedAt,
+		&i.CancelRequestedByID,
 	)
 	return i, err
 }
@@ -139,7 +141,8 @@ func (q *Queries) AdvanceWorkflowTriggerCAS(ctx context.Context, arg AdvanceWork
 const beginWorkflowRunSubmission = `-- name: BeginWorkflowRunSubmission :one
 UPDATE workflow_run SET status='submitting',submission_started_at=$3,submission_deadline=$4
 WHERE id=$1 AND workspace_id=$2 AND status='queued' AND submission_started_at IS NULL
-AND $3::timestamptz IS NOT NULL AND $4::timestamptz IS NOT NULL AND $4::timestamptz>$3::timestamptz RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at
+AND cancel_requested_at IS NULL
+AND $3::timestamptz IS NOT NULL AND $4::timestamptz IS NOT NULL AND $4::timestamptz>$3::timestamptz RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id
 `
 
 type BeginWorkflowRunSubmissionParams struct {
@@ -186,6 +189,8 @@ func (q *Queries) BeginWorkflowRunSubmission(ctx context.Context, arg BeginWorkf
 		&i.FinishedAt,
 		&i.DurationMs,
 		&i.CreatedAt,
+		&i.CancelRequestedAt,
+		&i.CancelRequestedByID,
 	)
 	return i, err
 }
@@ -451,7 +456,7 @@ func (q *Queries) CreateWorkflowRevision(ctx context.Context, arg CreateWorkflow
 const createWorkflowRun = `-- name: CreateWorkflowRun :one
 INSERT INTO workflow_run(id,workspace_id,workflow_id,revision_id,definition_hash,principal_user_id,trigger_id,source,planned_at,idempotency_key,input,status,reason_code,originator_user_id,accountable_user_id,originator_source)
 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$1,$10,$11,$12,$6,$6,$13)
-RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at
+RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id
 `
 
 type CreateWorkflowRunParams struct {
@@ -516,6 +521,8 @@ func (q *Queries) CreateWorkflowRun(ctx context.Context, arg CreateWorkflowRunPa
 		&i.FinishedAt,
 		&i.DurationMs,
 		&i.CreatedAt,
+		&i.CancelRequestedAt,
+		&i.CancelRequestedByID,
 	)
 	return i, err
 }
@@ -748,7 +755,7 @@ func (q *Queries) FinishWorkflowHatchetTenantDeletion(ctx context.Context, arg F
 const finishWorkflowRunCAS = `-- name: FinishWorkflowRunCAS :one
 UPDATE workflow_run SET status=$3,output=$4,reason_code=$5,failure_reason=$6,finished_at=now()
 WHERE id=$1 AND workspace_id=$2 AND status=$7 AND status IN ('queued','submitting','running')
-AND $3::text IN ('completed','failed','cancelled','skipped') RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at
+AND $3::text IN ('completed','failed','cancelled','skipped') RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id
 `
 
 type FinishWorkflowRunCASParams struct {
@@ -801,6 +808,8 @@ func (q *Queries) FinishWorkflowRunCAS(ctx context.Context, arg FinishWorkflowRu
 		&i.FinishedAt,
 		&i.DurationMs,
 		&i.CreatedAt,
+		&i.CancelRequestedAt,
+		&i.CancelRequestedByID,
 	)
 	return i, err
 }
@@ -834,7 +843,7 @@ func (q *Queries) GetActiveWorkflowRunnerToken(ctx context.Context, arg GetActiv
 }
 
 const getScheduledWorkflowRun = `-- name: GetScheduledWorkflowRun :one
-SELECT id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at FROM workflow_run WHERE trigger_id=$1 AND workspace_id=$2 AND planned_at=$3 AND source='schedule'
+SELECT id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id FROM workflow_run WHERE trigger_id=$1 AND workspace_id=$2 AND planned_at=$3 AND source='schedule'
 `
 
 type GetScheduledWorkflowRunParams struct {
@@ -875,6 +884,8 @@ func (q *Queries) GetScheduledWorkflowRun(ctx context.Context, arg GetScheduledW
 		&i.FinishedAt,
 		&i.DurationMs,
 		&i.CreatedAt,
+		&i.CancelRequestedAt,
+		&i.CancelRequestedByID,
 	)
 	return i, err
 }
@@ -1009,7 +1020,7 @@ func (q *Queries) GetWorkflowRevisionInWorkspace(ctx context.Context, arg GetWor
 }
 
 const getWorkflowRunByHatchetID = `-- name: GetWorkflowRunByHatchetID :one
-SELECT id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at FROM workflow_run WHERE hatchet_run_id=$1 AND workspace_id=$2
+SELECT id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id FROM workflow_run WHERE hatchet_run_id=$1 AND workspace_id=$2
 `
 
 type GetWorkflowRunByHatchetIDParams struct {
@@ -1049,12 +1060,14 @@ func (q *Queries) GetWorkflowRunByHatchetID(ctx context.Context, arg GetWorkflow
 		&i.FinishedAt,
 		&i.DurationMs,
 		&i.CreatedAt,
+		&i.CancelRequestedAt,
+		&i.CancelRequestedByID,
 	)
 	return i, err
 }
 
 const getWorkflowRunInWorkspace = `-- name: GetWorkflowRunInWorkspace :one
-SELECT id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at FROM workflow_run WHERE id=$1 AND workspace_id=$2
+SELECT id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id FROM workflow_run WHERE id=$1 AND workspace_id=$2
 `
 
 type GetWorkflowRunInWorkspaceParams struct {
@@ -1094,6 +1107,8 @@ func (q *Queries) GetWorkflowRunInWorkspace(ctx context.Context, arg GetWorkflow
 		&i.FinishedAt,
 		&i.DurationMs,
 		&i.CreatedAt,
+		&i.CancelRequestedAt,
+		&i.CancelRequestedByID,
 	)
 	return i, err
 }
@@ -1164,6 +1179,22 @@ func (q *Queries) GetWorkflowTriggerInWorkspace(ctx context.Context, arg GetWork
 		&i.UpdatedAt,
 	)
 	return i, err
+}
+
+const latestWorkflowRevisionVersion = `-- name: LatestWorkflowRevisionVersion :one
+SELECT COALESCE(MAX(version),0)::integer FROM workflow_revision WHERE workflow_id=$1 AND workspace_id=$2
+`
+
+type LatestWorkflowRevisionVersionParams struct {
+	WorkflowID  pgtype.UUID `json:"workflow_id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) LatestWorkflowRevisionVersion(ctx context.Context, arg LatestWorkflowRevisionVersionParams) (int32, error) {
+	row := q.db.QueryRow(ctx, latestWorkflowRevisionVersion, arg.WorkflowID, arg.WorkspaceID)
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
 const listWorkflowCollaborators = `-- name: ListWorkflowCollaborators :many
@@ -1341,7 +1372,7 @@ func (q *Queries) ListWorkflowRevisionsPage(ctx context.Context, arg ListWorkflo
 }
 
 const listWorkflowRuns = `-- name: ListWorkflowRuns :many
-SELECT id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at FROM workflow_run WHERE workflow_id=$1 AND workspace_id=$2 ORDER BY triggered_at DESC LIMIT $3 OFFSET $4
+SELECT id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id FROM workflow_run WHERE workflow_id=$1 AND workspace_id=$2 ORDER BY triggered_at DESC LIMIT $3 OFFSET $4
 `
 
 type ListWorkflowRunsParams struct {
@@ -1394,6 +1425,8 @@ func (q *Queries) ListWorkflowRuns(ctx context.Context, arg ListWorkflowRunsPara
 			&i.FinishedAt,
 			&i.DurationMs,
 			&i.CreatedAt,
+			&i.CancelRequestedAt,
+			&i.CancelRequestedByID,
 		); err != nil {
 			return nil, err
 		}
@@ -1406,7 +1439,7 @@ func (q *Queries) ListWorkflowRuns(ctx context.Context, arg ListWorkflowRunsPara
 }
 
 const listWorkflowRunsToReconcile = `-- name: ListWorkflowRunsToReconcile :many
-SELECT id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at FROM workflow_run WHERE workspace_id=$1 AND status IN ('queued','submitting','running') ORDER BY triggered_at LIMIT $2
+SELECT id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id FROM workflow_run WHERE workspace_id=$1 AND status IN ('queued','submitting','running') ORDER BY triggered_at LIMIT $2
 `
 
 type ListWorkflowRunsToReconcileParams struct {
@@ -1452,6 +1485,8 @@ func (q *Queries) ListWorkflowRunsToReconcile(ctx context.Context, arg ListWorkf
 			&i.FinishedAt,
 			&i.DurationMs,
 			&i.CreatedAt,
+			&i.CancelRequestedAt,
+			&i.CancelRequestedByID,
 		); err != nil {
 			return nil, err
 		}
@@ -1793,6 +1828,55 @@ WHERE workspace_id=$1 AND deletion_state='active'
 func (q *Queries) QueueWorkflowHatchetTenantDeletion(ctx context.Context, workspaceID pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, queueWorkflowHatchetTenantDeletion, workspaceID)
 	return err
+}
+
+const requestWorkflowRunCancellation = `-- name: RequestWorkflowRunCancellation :one
+UPDATE workflow_run SET cancel_requested_at=now(),cancel_requested_by_id=$3
+WHERE id=$1 AND workspace_id=$2 AND status IN ('queued','submitting','running') AND cancel_requested_at IS NULL RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id
+`
+
+type RequestWorkflowRunCancellationParams struct {
+	ID                  pgtype.UUID `json:"id"`
+	WorkspaceID         pgtype.UUID `json:"workspace_id"`
+	CancelRequestedByID pgtype.UUID `json:"cancel_requested_by_id"`
+}
+
+func (q *Queries) RequestWorkflowRunCancellation(ctx context.Context, arg RequestWorkflowRunCancellationParams) (WorkflowRun, error) {
+	row := q.db.QueryRow(ctx, requestWorkflowRunCancellation, arg.ID, arg.WorkspaceID, arg.CancelRequestedByID)
+	var i WorkflowRun
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.WorkflowID,
+		&i.RevisionID,
+		&i.DefinitionHash,
+		&i.PrincipalUserID,
+		&i.TriggerID,
+		&i.Source,
+		&i.Status,
+		&i.PlannedAt,
+		&i.IdempotencyKey,
+		&i.SubmissionStartedAt,
+		&i.SubmissionDeadline,
+		&i.HatchetRunID,
+		&i.Input,
+		&i.Output,
+		&i.IssueID,
+		&i.TaskID,
+		&i.OriginatorUserID,
+		&i.AccountableUserID,
+		&i.OriginatorSource,
+		&i.ReasonCode,
+		&i.FailureReason,
+		&i.TriggeredAt,
+		&i.StartedAt,
+		&i.FinishedAt,
+		&i.DurationMs,
+		&i.CreatedAt,
+		&i.CancelRequestedAt,
+		&i.CancelRequestedByID,
+	)
+	return i, err
 }
 
 const resolveWorkflowIngressToken = `-- name: ResolveWorkflowIngressToken :one
