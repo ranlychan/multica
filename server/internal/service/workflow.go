@@ -45,6 +45,8 @@ type WorkflowService struct {
 	TxStarter TxStarter
 	Ready     func() bool
 	Logs      WorkflowLogReader
+	Eligible  func(context.Context, pgtype.UUID, pgtype.UUID) bool
+	Engine    WorkflowEngine
 }
 
 type WorkflowLogEntry struct {
@@ -483,7 +485,7 @@ func (s *WorkflowService) AdmitRun(ctx context.Context, w db.Workflow, a Workflo
 	}
 	state := "queued"
 	reason := pgtype.Text{}
-	if s.Ready == nil || !s.Ready() {
+	if !s.runnable(ctx, w.WorkspaceID, r.ID) {
 		state = "skipped"
 		reason = pgtype.Text{String: "workflow_engine_unavailable", Valid: true}
 	}
@@ -501,6 +503,9 @@ func (s *WorkflowService) AdmitRun(ctx context.Context, w db.Workflow, a Workflo
 	}
 	if state == "skipped" {
 		return run, workflowError("workflow_engine_unavailable")
+	}
+	if s.Engine != nil {
+		return s.SubmitRun(ctx, RunIntent{WorkspaceID: run.WorkspaceID, RunID: run.ID})
 	}
 	return run, nil
 }

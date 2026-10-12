@@ -704,7 +704,6 @@ func main() {
 		}
 	}
 	defer stopHatchet()
-	_ = hatchetTenants // Workflow handlers consume this service in Task3/4.
 
 	r, h := NewRouterWithOptions(pool, hub, bus, analyticsClient, storeRedis, RouterOptions{
 		HTTPMetrics:         httpMetrics,
@@ -721,6 +720,10 @@ func main() {
 		LLMMaxRetries:       llmMaxRetries,
 		LLMDisableThinking:  llmDisableThinking,
 	})
+	if err := wireWorkflowRuntime(h.WorkflowSvc, hatchetSupervisor, hatchetTenants, hatchetConfig.APIURL); err != nil {
+		slog.Error("workflow runtime configuration failed")
+		os.Exit(1)
+	}
 	var replicaQueries *db.Queries
 	if replicaPool != nil {
 		replicaQueries = db.New(replicaPool)
@@ -843,6 +846,11 @@ func main() {
 	// logging them on the tick that fails and retrying on the next
 	// cycle, so a temporary outage does not crash the server.
 	schedulerMgr := scheduler.NewManager(pool, scheduler.Options{})
+	for _, job := range []scheduler.JobSpec{workflowScheduleJob(h.WorkflowSvc), workflowReconcilerJob(h.WorkflowSvc)} {
+		if err := schedulerMgr.Register(job); err != nil {
+			slog.Error("scheduler: register workflow runtime", "error", err)
+		}
+	}
 	if err := schedulerMgr.Register(scheduler.TaskUsageHourlyJob(pool)); err != nil {
 		slog.Warn("scheduler: failed to register task_usage_hourly rollup job", "error", err)
 	}

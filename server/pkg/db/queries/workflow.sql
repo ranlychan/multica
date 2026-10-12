@@ -80,9 +80,28 @@ UPDATE workflow_run SET status='submitting',submission_started_at=$3,submission_
 WHERE id=$1 AND workspace_id=$2 AND status='queued' AND submission_started_at IS NULL
 AND cancel_requested_at IS NULL
 AND $3::timestamptz IS NOT NULL AND $4::timestamptz IS NOT NULL AND $4::timestamptz>$3::timestamptz RETURNING *;
+-- name: ClaimWorkflowRunSubmissionAttempt :one
+UPDATE workflow_run SET submission_attempts=submission_attempts+1,submission_lease_until=now()+interval '45 seconds'
+WHERE id=$1 AND workspace_id=$2 AND status='submitting' AND hatchet_run_id IS NULL AND cancel_requested_at IS NULL
+AND submission_deadline>now()+interval '30 seconds' AND submission_attempts<5
+AND (submission_lease_until IS NULL OR submission_lease_until<=now()) RETURNING *;
+-- name: CancelUnsubmittedWorkflowRun :one
+UPDATE workflow_run SET status='cancelled',finished_at=now()
+WHERE id=$1 AND workspace_id=$2 AND status='queued' AND submission_started_at IS NULL AND cancel_requested_at IS NOT NULL RETURNING *;
+-- name: ProjectWorkflowRun :one
+UPDATE workflow_run SET log_projection=$3,step_projection=$4
+WHERE id=$1 AND workspace_id=$2 AND status IN ('queued','submitting','running') RETURNING *;
+-- name: ListWorkflowRuntimeWorkspaces :many
+SELECT DISTINCT workspace_id FROM workflow_run WHERE status IN ('queued','submitting','running')
+UNION SELECT DISTINCT workspace_id FROM workflow_trigger WHERE enabled AND kind='schedule';
+-- name: WorkflowDatabaseTime :one
+SELECT now()::timestamptz;
 -- name: AcknowledgeWorkflowRun :one
 UPDATE workflow_run SET status='running',hatchet_run_id=$3,started_at=now()
 WHERE id=$1 AND workspace_id=$2 AND status='submitting' RETURNING *;
+-- name: AcknowledgeWorkflowSubmissionAttempt :one
+UPDATE workflow_run SET status='running',hatchet_run_id=$3,started_at=now()
+WHERE id=$1 AND workspace_id=$2 AND status='submitting' AND submission_attempts=$4 AND submission_lease_until>now() RETURNING *;
 -- name: FinishWorkflowRunCAS :one
 UPDATE workflow_run SET status=$3,output=$4,reason_code=$5,failure_reason=$6,finished_at=now()
 WHERE id=$1 AND workspace_id=$2 AND status=$7 AND status IN ('queued','submitting','running')
