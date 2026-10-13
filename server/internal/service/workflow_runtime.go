@@ -65,9 +65,18 @@ func (s *WorkflowService) ClaimScheduledRuns(ctx context.Context, ws pgtype.UUID
 		if w.Status != "active" {
 			continue
 		}
+		if !w.CurrentRevisionID.Valid {
+			continue
+		}
 		r, e := q.GetWorkflowRevisionInWorkspace(ctx, db.GetWorkflowRevisionInWorkspaceParams{ID: w.CurrentRevisionID, WorkspaceID: ws})
+		if errors.Is(e, pgx.ErrNoRows) {
+			continue
+		}
 		if e != nil {
 			return nil, e
+		}
+		if r.WorkflowID != w.ID || r.ValidationStatus != "valid" || !r.PublishedAt.Valid {
+			continue
 		}
 		next, e := NextOccurrenceAfterUTC(tr.CronExpression.String, tr.Timezone, now)
 		if e != nil || next.IsZero() {
@@ -196,7 +205,9 @@ func (s *WorkflowService) ReconcileRuns(ctx context.Context, ws pgtype.UUID, lim
 	if limit < 1 || limit > WorkflowMaxPageSize {
 		limit = WorkflowMaxPageSize
 	}
-	runs, e := s.Queries.ListWorkflowRunsToReconcile(ctx, db.ListWorkflowRunsToReconcileParams{WorkspaceID: ws, Limit: limit})
+	// Advance a durable oldest-attempted marker before external requests. Crashes,
+	// unavailable engines and long-lived runs yield their turn to later rows.
+	runs, e := s.Queries.ClaimWorkflowRunsToReconcile(ctx, db.ClaimWorkflowRunsToReconcileParams{WorkspaceID: ws, Limit: limit})
 	if e != nil {
 		return e
 	}
@@ -261,20 +272,32 @@ func (s *WorkflowService) ReconcileRuns(ctx context.Context, ws pgtype.UUID, lim
 	return nil
 }
 
-func sanitizeWorkflowSteps(raw json.RawMessage) []byte {
+// WorkflowRunStep is the public product projection; IDs are authored graph
+// IDs, never engine task/step UUIDs or action names.
+type WorkflowRunStep struct {
+	ID         string     `json:"id"`
+	Status     string     `json:"status"`
+	Attempt    int32      `json:"attempt"`
+	StartedAt  *time.Time `json:"started_at,omitempty"`
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
+}
+
+// WorkflowRunSteps also bounds historical stored projections at read time.
+func WorkflowRunSteps(raw json.RawMessage) []WorkflowRunStep {
 	if len(raw) > WorkflowMaxGraphBytes {
-		return []byte(`[]`)
+		return []WorkflowRunStep{}
 	}
-	var steps []struct {
-		ID     string `json:"id"`
-		Status string `json:"status"`
-	}
+	var steps []WorkflowRunStep
 	if json.Unmarshal(raw, &steps) != nil || len(steps) > WorkflowMaxSteps {
-		return []byte(`[]`)
+		return []WorkflowRunStep{}
 	}
 	for i := range steps {
-		if len(steps[i].ID) > 128 {
-			return []byte(`[]`)
+		if len(steps[i].ID) > 128 || steps[i].ID == "" {
+			return []WorkflowRunStep{}
+		}
+		steps[i].ID = workflowLogSecrets.ReplaceAllString(steps[i].ID, "[redacted]")
+		if steps[i].Attempt < 0 {
+			steps[i].Attempt = 0
 		}
 		switch steps[i].Status {
 		case "QUEUED", "RUNNING", "COMPLETED", "FAILED", "CANCELLED":
@@ -282,7 +305,14 @@ func sanitizeWorkflowSteps(raw json.RawMessage) []byte {
 			steps[i].Status = "QUEUED"
 		}
 	}
-	b, _ := json.Marshal(steps)
+	if steps == nil {
+		return []WorkflowRunStep{}
+	}
+	return steps
+}
+
+func sanitizeWorkflowSteps(raw json.RawMessage) []byte {
+	b, _ := json.Marshal(WorkflowRunSteps(raw))
 	return b
 }
 

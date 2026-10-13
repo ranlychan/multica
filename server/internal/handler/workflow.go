@@ -715,6 +715,7 @@ func (h *Handler) GetWorkflowRun(w http.ResponseWriter, r *http.Request) {
 	if ok {
 		view := workflowRunView(run)
 		view["input"] = service.SanitizeWorkflowInput(run.Input)
+		view["steps"] = service.WorkflowRunSteps(run.StepProjection)
 		writeJSON(w, 200, view)
 	}
 }

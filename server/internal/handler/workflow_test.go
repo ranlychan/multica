@@ -248,3 +248,34 @@ func TestWorkflowHTTPDetailProjectsBoundedRedactedInput(t *testing.T) {
 		t.Fatal("detail input unbounded")
 	}
 }
+
+func TestWorkflowHTTPDetailExposesBoundedProductSteps(t *testing.T) {
+	wf := dbfx.Insert(t, "workflow", testutil.Cols{"workspace_id": testWorkspaceID, "name": "steps", "slug": "workflow-detail-steps", "created_by_type": "member", "created_by_id": testUserID})
+	id := uuid.NewString()
+	internalID := uuid.NewString()
+	dbfx.Insert(t, "workflow_run", testutil.Cols{"id": id, "workspace_id": testWorkspaceID, "workflow_id": wf, "revision_id": testUserID, "definition_hash": "hash", "principal_user_id": testUserID, "source": "manual", "idempotency_key": id, "step_projection": `[{"id":"authored-a","status":"RUNNING","attempt":2,"started_at":"2026-10-12T00:00:00Z","taskExternalId":"` + internalID + `","token":"wft_hidden","path":"/Users/hidden"}]`})
+	req := withURLParams(newRequest("GET", "/api/workflows/"+wf+"/runs/"+id, nil), "id", wf, "runId", id)
+	response := testutil.Call(t, testHandler.GetWorkflowRun, req).Want(200)
+	steps, ok := response.Map()["steps"].([]any)
+	if !ok || len(steps) != 1 {
+		t.Fatalf("product steps missing: %s", response.Text())
+	}
+	step := steps[0].(map[string]any)
+	if len(step) != 4 || step["id"] != "authored-a" || step["status"] != "RUNNING" || step["attempt"] != float64(2) || step["started_at"] != "2026-10-12T00:00:00Z" {
+		t.Fatalf("step fields changed: %+v", step)
+	}
+	if strings.Contains(response.Text(), internalID) || strings.Contains(response.Text(), "hidden") {
+		t.Fatal("raw engine identity/path/credential leaked")
+	}
+	summary := testutil.Call(t, testHandler.ListWorkflowRuns, withURLParams(newRequest("GET", "/api/workflows/"+wf+"/runs", nil), "id", wf)).Want(200)
+	if strings.Contains(summary.Text(), "authored-a") {
+		t.Fatal("list returned step details")
+	}
+	oversized := strings.Repeat(`{"id":"a","status":"RUNNING"},`, service.WorkflowMaxSteps) + `{"id":"b","status":"RUNNING"}`
+	dbfx.Exec(t, "UPDATE workflow_run SET step_projection=$2 WHERE id=$1", id, "["+oversized+"]")
+	response = testutil.Call(t, testHandler.GetWorkflowRun, req).Want(200)
+	steps, ok = response.Map()["steps"].([]any)
+	if !ok || len(steps) != 0 {
+		t.Fatal("historical step projection unbounded")
+	}
+}

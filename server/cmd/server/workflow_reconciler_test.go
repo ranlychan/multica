@@ -49,6 +49,11 @@ func TestWorkflowReconcilePinnedTransportAndJobWiring(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	action := revision.HatchetName + ":" + revision.HatchetName + "-step-ca978112ca1bbdca"
+	detail := bytes.Replace(captures["recovered-run"].Body, []byte("mc-contract-r1:mc-contract-r1"), []byte(action), 1)
+	if bytes.Equal(detail, captures["recovered-run"].Body) {
+		t.Fatal("pinned detail did not contain the expected action")
+	}
 	cred := hatchet.TenantCredentials{TenantID: uuid.NewString(), Token: "tenant-only"}
 	requests := 0
 	api := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
@@ -84,7 +89,7 @@ func TestWorkflowReconcilePinnedTransportAndJobWiring(t *testing.T) {
 		case strings.HasSuffix(r.URL.Path, "/logs"):
 			_, _ = rw.Write([]byte(`{"rows":[]}`))
 		case r.Method == "GET":
-			_, _ = rw.Write(captures["recovered-run"].Body)
+			_, _ = rw.Write(detail)
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 			rw.WriteHeader(404)
@@ -111,6 +116,13 @@ func TestWorkflowReconcilePinnedTransportAndJobWiring(t *testing.T) {
 	runs, e := s.Queries.ListWorkflowRuns(ctx, db.ListWorkflowRunsParams{WorkspaceID: w.WorkspaceID, WorkflowID: w.ID, Limit: 100})
 	if e != nil || len(runs) != 1 || runs[0].Status != "completed" || requests < 3 {
 		t.Fatalf("production jobs/transport did not complete: %+v %v requests=%d", runs, e, requests)
+	}
+	var steps []service.WorkflowRunStep
+	if e = json.Unmarshal(runs[0].StepProjection, &steps); e != nil || len(steps) != 1 || steps[0].ID != "a" || steps[0].Status != "COMPLETED" || steps[0].Attempt != 2 || steps[0].StartedAt == nil || steps[0].FinishedAt == nil {
+		t.Fatalf("pinned detail step did not become a bounded product projection: %+v %v", steps, e)
+	}
+	if bytes.Contains(runs[0].StepProjection, []byte("taskExternalId")) || bytes.Contains(runs[0].StepProjection, []byte("actionId")) || bytes.Contains(runs[0].StepProjection, []byte("663acdbf-5da2-412c-a095-d8dc814fa7ad")) {
+		t.Fatal("raw engine identity leaked into persisted steps")
 	}
 }
 
@@ -376,6 +388,55 @@ func TestWorkflowReconcileProjectionBounds(t *testing.T) {
 	logs, e := s.ReadWorkflowLogs(ctx, r, 200, 0)
 	if e != nil || len(r.LogProjection) > 65536 || len(logs) > 200 || bytes.Contains(r.LogProjection, []byte("wft_secret")) {
 		t.Fatalf("projection unsafe bytes=%d entries=%d %v", len(r.LogProjection), len(logs), e)
+	}
+}
+
+func TestWorkflowReconcileFairProgressBeyondOnePageAcrossRestartAndReplicas(t *testing.T) {
+	s, w, _ := workflowRuntimeFixture(t)
+	ctx := context.Background()
+	engine := &workflowEngineFixture{accepted: map[string]string{}, status: "RUNNING", logs: []service.WorkflowLogEntry{{StepID: "a", Message: "fair-scan", Level: "info"}}}
+	s.Engine = engine
+	_, e := testPool.Exec(ctx, `WITH ids AS (SELECT gen_random_uuid() id FROM generate_series(1,105))
+ INSERT INTO workflow_run(id,workspace_id,workflow_id,revision_id,definition_hash,principal_user_id,source,status,idempotency_key,input,submission_started_at,submission_deadline,hatchet_run_id,triggered_at)
+ SELECT id,$1,$2,$3,'hash',$4,'manual','running',id,'{}',now()-interval '1 hour',now()+interval '1 hour',gen_random_uuid(),now()-interval '1 hour' FROM ids`, w.WorkspaceID, w.ID, w.CurrentRevisionID, w.CreatedByID)
+	if e != nil {
+		t.Fatal(e)
+	}
+	runs, e := s.ClaimScheduledRuns(ctx, w.WorkspaceID, time.Now(), 100)
+	if e != nil || len(runs) != 1 {
+		t.Fatal(e)
+	}
+	later := runs[0]
+	if e = s.ReconcileRuns(ctx, w.WorkspaceID, 100); e != nil {
+		t.Fatal(e)
+	}
+	restarted := service.NewWorkflowService(s.Queries, testPool)
+	restarted.Ready = s.Ready
+	restarted.Eligible = s.Eligible
+	restarted.Engine = engine
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for _, replica := range []*service.WorkflowService{s, restarted} {
+		wg.Add(1)
+		go func(replica *service.WorkflowService) {
+			defer wg.Done()
+			errs <- replica.ReconcileRuns(ctx, w.WorkspaceID, 100)
+		}(replica)
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		if e != nil {
+			t.Fatal(e)
+		}
+	}
+	run, e := s.Queries.GetWorkflowRunInWorkspace(ctx, db.GetWorkflowRunInWorkspaceParams{ID: later.ID, WorkspaceID: w.WorkspaceID})
+	if e != nil || run.Status != "running" {
+		t.Fatalf("later committed intent starved behind old active page: status=%s %v", run.Status, e)
+	}
+	var reconciled int
+	if e = testPool.QueryRow(ctx, "SELECT count(*) FROM workflow_run WHERE workspace_id=$1 AND id<>$2 AND log_projection::text LIKE '%fair-scan%'", w.WorkspaceID, later.ID).Scan(&reconciled); e != nil || reconciled != 105 {
+		t.Fatalf("old active runs lost reconciliation progress: %d %v", reconciled, e)
 	}
 }
 

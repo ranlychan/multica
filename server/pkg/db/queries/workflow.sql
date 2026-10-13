@@ -56,6 +56,8 @@ UPDATE workflow_trigger SET token_hash=$3,updated_at=now() WHERE id=$1 AND works
 DELETE FROM workflow_trigger WHERE id=$1 AND workspace_id=$2;
 -- name: LockDueWorkflowTriggers :many
 SELECT t.* FROM workflow_trigger t JOIN workflow w ON w.id=t.workflow_id AND w.workspace_id=t.workspace_id
+JOIN workflow_revision r ON r.id=w.current_revision_id AND r.workspace_id=w.workspace_id AND r.workflow_id=w.id
+AND r.validation_status='valid' AND r.published_at IS NOT NULL
 WHERE t.workspace_id=$1 AND t.enabled AND t.kind='schedule' AND t.next_run_at <= $2 AND w.status='active'
 ORDER BY t.next_run_at LIMIT $3 FOR UPDATE OF t SKIP LOCKED;
 -- name: AdvanceWorkflowTriggerCAS :one
@@ -75,6 +77,13 @@ SELECT * FROM workflow_run WHERE trigger_id=$1 AND workspace_id=$2 AND planned_a
 SELECT * FROM workflow_run WHERE workflow_id=$1 AND workspace_id=$2 ORDER BY triggered_at DESC LIMIT $3 OFFSET $4;
 -- name: ListWorkflowRunsToReconcile :many
 SELECT * FROM workflow_run WHERE workspace_id=$1 AND status IN ('queued','submitting','running') ORDER BY triggered_at LIMIT $2;
+-- name: ClaimWorkflowRunsToReconcile :many
+WITH candidates AS (
+ SELECT id FROM workflow_run WHERE workspace_id=$1 AND status IN ('queued','submitting','running')
+ ORDER BY last_reconciled_at,id LIMIT $2 FOR UPDATE SKIP LOCKED
+)
+UPDATE workflow_run r SET last_reconciled_at=clock_timestamp()
+FROM candidates c WHERE r.id=c.id AND r.workspace_id=$1 RETURNING r.*;
 -- name: BeginWorkflowRunSubmission :one
 UPDATE workflow_run SET status='submitting',submission_started_at=$3,submission_deadline=$4
 WHERE id=$1 AND workspace_id=$2 AND status='queued' AND submission_started_at IS NULL

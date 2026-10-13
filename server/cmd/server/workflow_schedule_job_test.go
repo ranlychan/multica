@@ -136,3 +136,52 @@ func TestWorkflowScheduleManualRequiresWorkspaceEligibility(t *testing.T) {
 		t.Fatalf("unverified daemon admitted: %+v %v", run, e)
 	}
 }
+
+func TestWorkflowScheduleDefersUnpublishedWithoutPoisoningPublishedTrigger(t *testing.T) {
+	s, w, tr := workflowRuntimeFixture(t)
+	ctx := context.Background()
+	a := service.WorkflowActor{HumanID: w.CreatedByID, AuditID: w.CreatedByID, AuditType: "member"}
+	unpublished, e := s.Create(ctx, w.WorkspaceID, a, "pending", "pending", "")
+	if e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(context.Background(), "DELETE FROM workflow_run WHERE workflow_id=$1", unpublished.ID)
+		_, _ = testPool.Exec(context.Background(), "DELETE FROM workflow_trigger WHERE workflow_id=$1", unpublished.ID)
+		_, _ = testPool.Exec(context.Background(), "DELETE FROM workflow_revision WHERE workflow_id=$1", unpublished.ID)
+		_, _ = testPool.Exec(context.Background(), "DELETE FROM workflow WHERE id=$1", unpublished.ID)
+	})
+	deferred, e := s.Queries.CreateWorkflowTrigger(ctx, db.CreateWorkflowTriggerParams{WorkspaceID: w.WorkspaceID, WorkflowID: unpublished.ID, Kind: "schedule", PrincipalUserID: a.HumanID, Enabled: true, CronExpression: tr.CronExpression, Timezone: tr.Timezone, NextRunAt: pgtype.Timestamptz{Time: tr.NextRunAt.Time.Add(-time.Minute), Valid: true}, InputTemplate: []byte(`{}`), CreatedByType: "member", CreatedByID: a.HumanID})
+	if e != nil {
+		t.Fatal(e)
+	}
+	runs, e := s.ClaimScheduledRuns(ctx, w.WorkspaceID, time.Now(), 100)
+	if e != nil || len(runs) != 1 || runs[0].WorkflowID != w.ID {
+		t.Fatalf("unpublished schedule poisoned valid delivery: rows=%d %v", len(runs), e)
+	}
+	after, e := s.Queries.GetWorkflowTriggerInWorkspace(ctx, db.GetWorkflowTriggerInWorkspaceParams{ID: deferred.ID, WorkspaceID: w.WorkspaceID})
+	if e != nil || after.LastFiredAt.Valid || after.NextRunAt != deferred.NextRunAt {
+		t.Fatal("unpublished schedule advanced without revision")
+	}
+	history, e := s.Queries.ListWorkflowRuns(ctx, db.ListWorkflowRunsParams{WorkflowID: unpublished.ID, WorkspaceID: w.WorkspaceID, Limit: 100})
+	if e != nil || len(history) != 0 {
+		t.Fatal("unpublished schedule invented a snapshot")
+	}
+	// The saved overdue occurrence is eligible after publication. Its original
+	// planned time remains the deduplication key and no earlier run is invented.
+	publication, e := s.PublishRevision(ctx, w.WorkspaceID, unpublished.ID, a, 0, "export default pending", json.RawMessage(`{"steps":[{"id":"a"}]}`))
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = s.AcknowledgeRevision(ctx, w.WorkspaceID, publication.Revision.ID, publication.Revision.DefinitionHash, true); e != nil {
+		t.Fatal(e)
+	}
+	runs, e = s.ClaimScheduledRuns(ctx, w.WorkspaceID, time.Now(), 100)
+	if e != nil || len(runs) != 1 || runs[0].WorkflowID != unpublished.ID || runs[0].RevisionID != publication.Revision.ID || !runs[0].PlannedAt.Time.Equal(deferred.NextRunAt.Time) {
+		t.Fatalf("overdue occurrence after publication: rows=%+v %v", runs, e)
+	}
+	after, e = s.Queries.GetWorkflowTriggerInWorkspace(ctx, db.GetWorkflowTriggerInWorkspaceParams{ID: deferred.ID, WorkspaceID: w.WorkspaceID})
+	if e != nil || !after.LastFiredAt.Time.Equal(deferred.NextRunAt.Time) || !after.NextRunAt.Time.After(time.Now()) {
+		t.Fatalf("published schedule did not advance: %+v %v", after, e)
+	}
+}

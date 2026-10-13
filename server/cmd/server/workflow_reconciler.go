@@ -124,10 +124,13 @@ func (e *workflowHatchetEngine) Inspect(ctx context.Context, r db.WorkflowRun) (
 			Output json.RawMessage `json:"output"`
 		} `json:"run"`
 		Tasks []struct {
-			StepID   string `json:"stepId"`
-			Status   string `json:"status"`
-			TaskID   string `json:"taskExternalId"`
-			ActionID string `json:"actionId"`
+			StepID     string     `json:"stepId"`
+			Status     string     `json:"status"`
+			TaskID     string     `json:"taskExternalId"`
+			ActionID   string     `json:"actionId"`
+			Attempt    int32      `json:"attempt"`
+			StartedAt  *time.Time `json:"startedAt"`
+			FinishedAt *time.Time `json:"finishedAt"`
 		} `json:"tasks"`
 	}
 	if json.Unmarshal(raw, &detail) != nil || len(detail.Tasks) > service.WorkflowMaxSteps {
@@ -146,13 +149,16 @@ func (e *workflowHatchetEngine) Inspect(ctx context.Context, r db.WorkflowRun) (
 	for _, step := range graph.Steps {
 		actions[revision.HatchetName+":"+service.WorkflowActionName(revision, step.ID)] = step.ID
 	}
-	steps := []map[string]string{}
+	steps := []service.WorkflowRunStep{}
 	for _, task := range detail.Tasks {
 		stepID, ok := actions[task.ActionID]
 		if !ok {
 			continue
 		}
-		steps = append(steps, map[string]string{"id": stepID, "status": task.Status})
+		steps = append(steps, service.WorkflowRunStep{ID: stepID, Status: task.Status, Attempt: task.Attempt, StartedAt: task.StartedAt, FinishedAt: task.FinishedAt})
+		if len(state.Logs) >= service.WorkflowMaxLogEntries {
+			continue
+		}
 		logsRaw, logErr := e.client.Logs(ctx, cred, task.TaskID, service.WorkflowMaxLogEntries)
 		if logErr != nil {
 			continue
@@ -172,9 +178,6 @@ func (e *workflowHatchetEngine) Inspect(ctx context.Context, r db.WorkflowRun) (
 			if len(state.Logs) >= service.WorkflowMaxLogEntries {
 				break
 			}
-		}
-		if len(state.Logs) >= service.WorkflowMaxLogEntries {
-			break
 		}
 	}
 	state.Logs = service.SanitizeWorkflowLogs(state.Logs)

@@ -46,7 +46,7 @@ func TestWorkflowDurableContracts(t *testing.T) {
 	sort.Strings(files)
 	var applied []string
 	for _, file := range files {
-		if filepath.Base(file) < "564_" || filepath.Base(file) >= "594_" {
+		if filepath.Base(file) < "564_" || filepath.Base(file) >= "596_" {
 			continue
 		}
 		b, err := os.ReadFile(file)

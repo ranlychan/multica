@@ -156,6 +156,7 @@ var concurrentIndexCleanups = map[string]string{
 	"586_workflow_collaborator_index":                           "idx_workflow_collaborator",
 	"589_workflow_operation_key_index":                          "idx_workflow_operation_key",
 	"590_workflow_revision_hatchet_name_index":                  "idx_workflow_revision_hatchet_name",
+	"595_workflow_reconciliation_progress_index":                "idx_workflow_run_reconciliation_progress",
 	"563_search_index_change_changed_at_index":                  "idx_search_index_change_changed_at",
 	"562_search_index_change_workspace_index":                   "idx_search_index_change_workspace_xid",
 	"552_agent_task_history_page_index":                         "idx_agent_task_queue_history_page",

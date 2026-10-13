@@ -1819,6 +1819,8 @@ type WorkflowRun struct {
 	SubmissionLeaseUntil pgtype.Timestamptz `json:"submission_lease_until"`
 	LogProjection        []byte             `json:"log_projection"`
 	StepProjection       []byte             `json:"step_projection"`
+	// Durable fair scan marker advanced atomically before engine requests; oldest attempted active rows receive the next bounded turn.
+	LastReconciledAt pgtype.Timestamptz `json:"last_reconciled_at"`
 }
 
 type WorkflowRunnerToken struct {
