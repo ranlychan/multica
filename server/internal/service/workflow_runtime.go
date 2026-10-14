@@ -124,6 +124,15 @@ func (s *WorkflowService) SubmitRun(ctx context.Context, intent RunIntent) (db.W
 	if r.Status != "queued" && r.Status != "submitting" {
 		return r, nil
 	}
+	if r.Status == "queued" || (r.Status == "submitting" && r.SubmissionAttempts == 0) {
+		skipped, skipErr := s.Queries.SkipDepartedUnsubmittedWorkflowRun(ctx, db.SkipDepartedUnsubmittedWorkflowRunParams{ID: r.ID, WorkspaceID: r.WorkspaceID})
+		if skipErr == nil {
+			return skipped, nil
+		}
+		if !errors.Is(skipErr, pgx.ErrNoRows) {
+			return r, skipErr
+		}
+	}
 	if r.CancelRequestedAt.Valid {
 		if r.Status == "queued" && !r.SubmissionStartedAt.Valid {
 			result, e := s.Queries.CancelUnsubmittedWorkflowRun(ctx, db.CancelUnsubmittedWorkflowRunParams{ID: r.ID, WorkspaceID: r.WorkspaceID})
@@ -133,15 +142,6 @@ func (s *WorkflowService) SubmitRun(ctx context.Context, intent RunIntent) (db.W
 			return result, e
 		}
 		return r, nil
-	}
-	if r.Status == "queued" {
-		skipped, skipErr := s.Queries.SkipDepartedUnsubmittedWorkflowRun(ctx, db.SkipDepartedUnsubmittedWorkflowRunParams{ID: r.ID, WorkspaceID: r.WorkspaceID})
-		if skipErr == nil {
-			return skipped, nil
-		}
-		if !errors.Is(skipErr, pgx.ErrNoRows) {
-			return r, skipErr
-		}
 	}
 	rev, e := s.Queries.GetWorkflowRevisionInWorkspace(ctx, db.GetWorkflowRevisionInWorkspaceParams{ID: r.RevisionID, WorkspaceID: r.WorkspaceID})
 	if e != nil {
@@ -187,6 +187,15 @@ func (s *WorkflowService) SubmitRun(ctx context.Context, intent RunIntent) (db.W
 	defer cancel()
 	claimed, e := s.Queries.ClaimWorkflowRunSubmissionAttempt(requestCtx, db.ClaimWorkflowRunSubmissionAttemptParams{ID: r.ID, WorkspaceID: r.WorkspaceID})
 	if errors.Is(e, pgx.ErrNoRows) {
+		if r.SubmissionAttempts == 0 {
+			skipped, skipErr := s.Queries.SkipDepartedUnsubmittedWorkflowRun(ctx, db.SkipDepartedUnsubmittedWorkflowRunParams{ID: r.ID, WorkspaceID: r.WorkspaceID})
+			if skipErr == nil {
+				return skipped, nil
+			}
+			if !errors.Is(skipErr, pgx.ErrNoRows) {
+				return r, skipErr
+			}
+		}
 		return r, nil
 	}
 	if e != nil {
@@ -242,11 +251,32 @@ func (s *WorkflowService) ReconcileRuns(ctx context.Context, ws pgtype.UUID, lim
 			break
 		}
 		r := runs[0]
+		claimedAt := r.LastReconciledAt
 		if r.Status == "queued" {
 			if _, e = s.SubmitRun(ctx, RunIntent{WorkspaceID: ws, RunID: r.ID}); e != nil {
 				return e
 			}
 			continue
+		}
+		if r.Status == "submitting" && r.SubmissionAttempts == 0 {
+			_, skipErr := s.Queries.SkipDepartedUnsubmittedWorkflowRun(ctx, db.SkipDepartedUnsubmittedWorkflowRunParams{ID: r.ID, WorkspaceID: ws})
+			if skipErr == nil {
+				continue
+			}
+			if !errors.Is(skipErr, pgx.ErrNoRows) {
+				return skipErr
+			}
+			r, e = s.Queries.GetWorkflowRunInWorkspace(ctx, db.GetWorkflowRunInWorkspaceParams{ID: r.ID, WorkspaceID: ws})
+			if errors.Is(e, pgx.ErrNoRows) {
+				continue
+			}
+			if e != nil {
+				return e
+			}
+			if r.Status != "submitting" {
+				continue
+			}
+			r.LastReconciledAt = claimedAt
 		}
 		if s.Engine == nil || s.Ready == nil || !s.Ready() {
 			if r.PendingTerminalStatus.Valid {
@@ -275,6 +305,7 @@ func (s *WorkflowService) ReconcileRuns(ctx context.Context, ws pgtype.UUID, lim
 			if e != nil {
 				return e
 			}
+			r.LastReconciledAt = claimedAt
 		}
 		if r.Status != "running" {
 			continue
@@ -296,13 +327,19 @@ func (s *WorkflowService) ReconcileRuns(ctx context.Context, ws pgtype.UUID, lim
 		steps := sanitizeWorkflowSteps(state.Steps)
 		terminal := map[string]string{"COMPLETED": "completed", "FAILED": "failed", "CANCELLED": "cancelled"}[state.Status]
 		if state.LogsIncomplete {
-			r, e = s.Queries.ProjectWorkflowSteps(ctx, db.ProjectWorkflowStepsParams{ID: r.ID, WorkspaceID: ws, StepProjection: steps})
-			if errors.Is(e, pgx.ErrNoRows) {
+			projected, projectErr := s.Queries.ProjectWorkflowSteps(ctx, db.ProjectWorkflowStepsParams{ID: r.ID, WorkspaceID: ws, StepProjection: steps, LastReconciledAt: r.LastReconciledAt, ObservedTerminalStatus: terminal})
+			if errors.Is(projectErr, pgx.ErrNoRows) {
+				if r.PendingTerminalStatus.Valid {
+					if e = s.retryPendingWorkflowTerminal(ctx, r, "", nil); e != nil {
+						return e
+					}
+				}
 				continue
 			}
-			if e != nil {
-				return e
+			if projectErr != nil {
+				return projectErr
 			}
+			r = projected
 			if terminal != "" || r.PendingTerminalStatus.Valid {
 				if e = s.retryPendingWorkflowTerminal(ctx, r, terminal, SanitizeWorkflowInput(state.Output)); e != nil {
 					return e
@@ -311,28 +348,45 @@ func (s *WorkflowService) ReconcileRuns(ctx context.Context, ws pgtype.UUID, lim
 			continue
 		}
 		logs, _ := json.Marshal(SanitizeWorkflowLogs(state.Logs))
-		r, e = s.Queries.ProjectWorkflowRun(ctx, db.ProjectWorkflowRunParams{ID: r.ID, WorkspaceID: ws, LogProjection: logs, StepProjection: steps})
+		if terminal != "" {
+			_, e = s.Queries.FinishWorkflowRunWithCompleteProjection(ctx, db.FinishWorkflowRunWithCompleteProjectionParams{ID: r.ID, WorkspaceID: ws, TerminalStatus: terminal, TerminalOutput: SanitizeWorkflowInput(state.Output), LogProjection: logs, StepProjection: steps, LastReconciledAt: r.LastReconciledAt})
+			if errors.Is(e, pgx.ErrNoRows) {
+				if r.PendingTerminalStatus.Valid {
+					if e = s.retryPendingWorkflowTerminal(ctx, r, "", nil); e != nil {
+						return e
+					}
+				}
+				continue
+			}
+			if e != nil {
+				return e
+			}
+			continue
+		}
+		_, e = s.Queries.ProjectWorkflowRun(ctx, db.ProjectWorkflowRunParams{ID: r.ID, WorkspaceID: ws, LogProjection: logs, StepProjection: steps, LastReconciledAt: r.LastReconciledAt})
 		if errors.Is(e, pgx.ErrNoRows) {
+			if r.PendingTerminalStatus.Valid {
+				if e = s.retryPendingWorkflowTerminal(ctx, r, "", nil); e != nil {
+					return e
+				}
+			}
 			continue
 		}
 		if e != nil {
 			return e
-		}
-		if terminal != "" || r.PendingTerminalStatus.Valid {
-			if e = s.finishWorkflowTerminal(ctx, r, terminal, SanitizeWorkflowInput(state.Output), false); e != nil {
-				return e
-			}
 		}
 	}
 	return nil
 }
 
 func (s *WorkflowService) retryPendingWorkflowTerminal(ctx context.Context, r db.WorkflowRun, status string, output json.RawMessage) error {
+	var staged db.WorkflowRun
 	var e error
 	if status != "" {
-		r, e = s.Queries.StageWorkflowTerminalProjection(ctx, db.StageWorkflowTerminalProjectionParams{ID: r.ID, WorkspaceID: r.WorkspaceID, TerminalStatus: status, TerminalOutput: output})
-	} else {
-		r, e = s.Queries.AdvanceWorkflowTerminalProjectionRetry(ctx, db.AdvanceWorkflowTerminalProjectionRetryParams{ID: r.ID, WorkspaceID: r.WorkspaceID})
+		staged, e = s.Queries.StageWorkflowTerminalProjection(ctx, db.StageWorkflowTerminalProjectionParams{ID: r.ID, WorkspaceID: r.WorkspaceID, TerminalStatus: status, TerminalOutput: output, LastReconciledAt: r.LastReconciledAt})
+	}
+	if status == "" || errors.Is(e, pgx.ErrNoRows) {
+		staged, e = s.Queries.AdvanceWorkflowTerminalProjectionRetry(ctx, db.AdvanceWorkflowTerminalProjectionRetryParams{ID: r.ID, WorkspaceID: r.WorkspaceID, LastReconciledAt: r.LastReconciledAt})
 	}
 	if errors.Is(e, pgx.ErrNoRows) {
 		return nil
@@ -340,22 +394,10 @@ func (s *WorkflowService) retryPendingWorkflowTerminal(ctx context.Context, r db
 	if e != nil {
 		return e
 	}
-	if r.FinalProjectionAttempts < workflowFinalProjectionMaxAttempts {
+	if staged.FinalProjectionAttempts < workflowFinalProjectionMaxAttempts {
 		return nil
 	}
-	return s.finishWorkflowTerminal(ctx, r, "", nil, true)
-}
-
-func (s *WorkflowService) finishWorkflowTerminal(ctx context.Context, r db.WorkflowRun, status string, output json.RawMessage, logsIncomplete bool) error {
-	if r.PendingTerminalStatus.Valid {
-		status = r.PendingTerminalStatus.String
-		output = r.PendingTerminalOutput
-	}
-	reason := pgtype.Text{}
-	if logsIncomplete {
-		reason = pgtype.Text{String: "workflow_final_logs_incomplete", Valid: true}
-	}
-	_, e := s.Queries.FinishWorkflowRunCAS(ctx, db.FinishWorkflowRunCASParams{ID: r.ID, WorkspaceID: r.WorkspaceID, Status: status, Status_2: "running", Output: output, ReasonCode: reason})
+	_, e = s.Queries.FinishWorkflowRunWithIncompleteProjection(ctx, db.FinishWorkflowRunWithIncompleteProjectionParams{ID: staged.ID, WorkspaceID: staged.WorkspaceID, MinAttempts: workflowFinalProjectionMaxAttempts, LastReconciledAt: staged.LastReconciledAt})
 	if errors.Is(e, pgx.ErrNoRows) {
 		return nil
 	}

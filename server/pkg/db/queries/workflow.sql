@@ -83,11 +83,13 @@ WITH candidates AS (
  AND wr.last_reconciled_at < $3
  ORDER BY wr.last_reconciled_at,wr.id LIMIT $2 FOR UPDATE OF wr SKIP LOCKED
 )
-UPDATE workflow_run r SET last_reconciled_at=clock_timestamp()
+UPDATE workflow_run r SET last_reconciled_at=GREATEST(clock_timestamp(),r.last_reconciled_at+interval '1 microsecond')
 FROM candidates c WHERE r.id=c.id AND r.workspace_id=$1 RETURNING r.*;
 -- name: SkipDepartedUnsubmittedWorkflowRun :one
 UPDATE workflow_run r SET status='skipped',reason_code='workflow_principal_departed',finished_at=now()
-WHERE r.id=$1 AND r.workspace_id=$2 AND r.status='queued' AND r.submission_started_at IS NULL
+WHERE r.id=$1 AND r.workspace_id=$2 AND
+ ((r.status='queued' AND r.submission_started_at IS NULL) OR
+  (r.status='submitting' AND r.submission_attempts=0 AND r.hatchet_run_id IS NULL))
 AND NOT EXISTS (SELECT 1 FROM member m WHERE m.workspace_id=r.workspace_id AND m.user_id=r.principal_user_id)
 RETURNING r.*;
 -- name: BeginWorkflowRunSubmission :one
@@ -107,19 +109,40 @@ UPDATE workflow_run SET status='cancelled',finished_at=now()
 WHERE id=$1 AND workspace_id=$2 AND status='queued' AND submission_started_at IS NULL AND cancel_requested_at IS NOT NULL RETURNING *;
 -- name: ProjectWorkflowRun :one
 UPDATE workflow_run SET log_projection=$3,step_projection=$4
-WHERE id=$1 AND workspace_id=$2 AND status IN ('queued','submitting','running') RETURNING *;
+WHERE id=$1 AND workspace_id=$2 AND status='running' AND pending_terminal_status IS NULL
+AND last_reconciled_at=sqlc.arg('last_reconciled_at')::timestamptz RETURNING *;
 -- name: ProjectWorkflowSteps :one
 UPDATE workflow_run SET step_projection=$3
-WHERE id=$1 AND workspace_id=$2 AND status='running' RETURNING *;
+WHERE id=$1 AND workspace_id=$2 AND status='running'
+AND last_reconciled_at=sqlc.arg('last_reconciled_at')::timestamptz
+AND (pending_terminal_status IS NULL OR pending_terminal_status=sqlc.arg('observed_terminal_status')::text) RETURNING *;
 -- name: StageWorkflowTerminalProjection :one
 UPDATE workflow_run SET pending_terminal_status=COALESCE(pending_terminal_status,sqlc.arg('terminal_status')::text),
  pending_terminal_output=COALESCE(pending_terminal_output,sqlc.arg('terminal_output')::jsonb),
  final_projection_attempts=final_projection_attempts+1
 WHERE id=$1 AND workspace_id=$2 AND status='running'
-AND sqlc.arg('terminal_status')::text IN ('completed','failed','cancelled') RETURNING *;
+AND last_reconciled_at=sqlc.arg('last_reconciled_at')::timestamptz
+AND sqlc.arg('terminal_status')::text IN ('completed','failed','cancelled')
+AND (pending_terminal_status IS NULL OR pending_terminal_status=sqlc.arg('terminal_status')::text) RETURNING *;
 -- name: AdvanceWorkflowTerminalProjectionRetry :one
 UPDATE workflow_run SET final_projection_attempts=final_projection_attempts+1
-WHERE id=$1 AND workspace_id=$2 AND status='running' AND pending_terminal_status IS NOT NULL RETURNING *;
+WHERE id=$1 AND workspace_id=$2 AND status='running' AND pending_terminal_status IS NOT NULL
+AND last_reconciled_at=sqlc.arg('last_reconciled_at')::timestamptz RETURNING *;
+-- name: FinishWorkflowRunWithCompleteProjection :one
+UPDATE workflow_run SET status=sqlc.arg('terminal_status')::text,
+ output=COALESCE(pending_terminal_output,sqlc.arg('terminal_output')::jsonb),
+ log_projection=sqlc.arg('log_projection')::jsonb,step_projection=sqlc.arg('step_projection')::jsonb,
+ reason_code=NULL,finished_at=now()
+WHERE id=$1 AND workspace_id=$2 AND status='running'
+AND last_reconciled_at=sqlc.arg('last_reconciled_at')::timestamptz
+AND sqlc.arg('terminal_status')::text IN ('completed','failed','cancelled')
+AND (pending_terminal_status IS NULL OR pending_terminal_status=sqlc.arg('terminal_status')::text) RETURNING *;
+-- name: FinishWorkflowRunWithIncompleteProjection :one
+UPDATE workflow_run SET status=pending_terminal_status,output=pending_terminal_output,
+ reason_code='workflow_final_logs_incomplete',finished_at=now()
+WHERE id=$1 AND workspace_id=$2 AND status='running' AND pending_terminal_status IS NOT NULL
+AND final_projection_attempts>=sqlc.arg('min_attempts')::int
+AND last_reconciled_at=sqlc.arg('last_reconciled_at')::timestamptz RETURNING *;
 -- name: ListWorkflowRuntimeWorkspaces :many
 SELECT DISTINCT workspace_id FROM workflow_run WHERE status IN ('queued','submitting','running')
 UNION SELECT DISTINCT workspace_id FROM workflow_trigger WHERE enabled AND kind='schedule';

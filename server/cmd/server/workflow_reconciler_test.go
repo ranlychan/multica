@@ -257,6 +257,107 @@ func TestWorkflowReconcileTerminalLogOutagePreservesAndRecoversProjection(t *tes
 	}
 }
 
+func TestWorkflowReconcileOverlappingOldRunningPollCannotPublishTerminalLogs(t *testing.T) {
+	s, w, _ := workflowRuntimeFixture(t)
+	ctx := context.Background()
+	runs, e := s.ClaimScheduledRuns(ctx, w.WorkspaceID, time.Now(), 100)
+	if e != nil || len(runs) != 1 {
+		t.Fatal(e)
+	}
+	if _, e = testPool.Exec(ctx, "UPDATE workflow_run SET status='running',submission_started_at=now(),submission_deadline=now()+interval '55 minutes',hatchet_run_id=$2 WHERE id=$1", runs[0].ID, uuid.NewString()); e != nil {
+		t.Fatal(e)
+	}
+	var capture map[string]struct {
+		Body json.RawMessage `json:"body"`
+	}
+	raw, e := os.ReadFile("../../internal/hatchet/testdata/live-responses.json")
+	if e != nil || json.Unmarshal(raw, &capture) != nil {
+		t.Fatal(e)
+	}
+	revision, e := s.Queries.GetWorkflowRevisionInWorkspace(ctx, db.GetWorkflowRevisionInWorkspaceParams{ID: w.CurrentRevisionID, WorkspaceID: w.WorkspaceID})
+	if e != nil {
+		t.Fatal(e)
+	}
+	action := revision.HatchetName + ":" + revision.HatchetName + "-step-ca978112ca1bbdca"
+	detail := bytes.Replace(capture["recovered-run"].Body, []byte("mc-contract-r1:mc-contract-r1"), []byte(action), 1)
+	var mode atomic.Int32 // 0: prior healthy, 1: old running poll blocks, 2: terminal logs fail, 3: final logs recover
+	oldPollAtLogs := make(chan struct{})
+	releaseOldPoll := make(chan struct{})
+	var release sync.Once
+	releasePoll := func() { release.Do(func() { close(releaseOldPoll) }) }
+	defer releasePoll()
+	api := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		rw.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/status"):
+			if mode.Load() < 2 {
+				_, _ = rw.Write([]byte(`"RUNNING"`))
+			} else {
+				_, _ = rw.Write([]byte(`"COMPLETED"`))
+			}
+		case strings.HasSuffix(r.URL.Path, "/logs"):
+			switch mode.Load() {
+			case 1:
+				close(oldPollAtLogs)
+				<-releaseOldPoll
+				_, _ = rw.Write([]byte(`{"rows":[]}`))
+			case 2:
+				rw.WriteHeader(http.StatusServiceUnavailable)
+			case 3:
+				_, _ = rw.Write([]byte(`{"rows":[{"message":"final-log","level":"INFO","createdAt":"2026-09-30T00:00:00Z"}]}`))
+			default:
+				_, _ = rw.Write([]byte(`{"rows":[{"message":"known-log","level":"INFO","createdAt":"2026-09-30T00:00:00Z"}]}`))
+			}
+		default:
+			_, _ = rw.Write(detail)
+		}
+	}))
+	defer api.Close()
+	client, e := hatchet.NewClient(api.URL, nil)
+	if e != nil {
+		t.Fatal(e)
+	}
+	engine := &workflowHatchetEngine{client: client, tenants: workflowCredentialFixture{cred: hatchet.TenantCredentials{TenantID: uuid.NewString(), Token: "tenant-only"}}, queries: s.Queries}
+	s.Engine = engine
+	if e = s.ReconcileRuns(ctx, w.WorkspaceID, 100); e != nil {
+		t.Fatal(e)
+	}
+	replica := service.NewWorkflowService(s.Queries, testPool)
+	replica.Ready, replica.Eligible, replica.Engine = s.Ready, s.Eligible, engine
+	mode.Store(1)
+	oldPollDone := make(chan error, 1)
+	go func() { oldPollDone <- replica.ReconcileRuns(ctx, w.WorkspaceID, 100) }()
+	select {
+	case <-oldPollAtLogs:
+	case <-time.After(5 * time.Second):
+		t.Fatal("old running poll did not reach blocked log response")
+	}
+	mode.Store(2)
+	if e = s.ReconcileRuns(ctx, w.WorkspaceID, 100); e != nil {
+		t.Fatal(e)
+	}
+	staged, e := s.Queries.GetWorkflowRunInWorkspace(ctx, db.GetWorkflowRunInWorkspaceParams{ID: runs[0].ID, WorkspaceID: w.WorkspaceID})
+	if e != nil || staged.Status != "running" || staged.PendingTerminalStatus.String != "completed" || !bytes.Contains(staged.LogProjection, []byte("known-log")) {
+		t.Fatalf("terminal poll did not retain prior logs and stage outcome: status=%s pending=%s logs=%s %v", staged.Status, staged.PendingTerminalStatus.String, staged.LogProjection, e)
+	}
+	releasePoll()
+	if e = <-oldPollDone; e != nil {
+		t.Fatal(e)
+	}
+	staged, e = s.Queries.GetWorkflowRunInWorkspace(ctx, db.GetWorkflowRunInWorkspaceParams{ID: runs[0].ID, WorkspaceID: w.WorkspaceID})
+	if e != nil || staged.Status != "running" || staged.PendingTerminalStatus.String != "completed" || !bytes.Contains(staged.LogProjection, []byte("known-log")) || staged.ReasonCode.Valid {
+		t.Fatalf("old running poll overwrote terminal recovery: status=%s pending=%s logs=%s reason=%s %v", staged.Status, staged.PendingTerminalStatus.String, staged.LogProjection, staged.ReasonCode.String, e)
+	}
+	mode.Store(3)
+	if e = s.ReconcileRuns(ctx, w.WorkspaceID, 100); e != nil {
+		t.Fatal(e)
+	}
+	final, e := s.Queries.GetWorkflowRunInWorkspace(ctx, db.GetWorkflowRunInWorkspaceParams{ID: runs[0].ID, WorkspaceID: w.WorkspaceID})
+	if e != nil || final.Status != "completed" || !bytes.Contains(final.LogProjection, []byte("final-log")) || final.ReasonCode.Valid {
+		t.Fatalf("matching terminal poll failed to publish final logs: status=%s logs=%s reason=%s %v", final.Status, final.LogProjection, final.ReasonCode.String, e)
+	}
+}
+
 type workflowEngineFixture struct {
 	mu          sync.Mutex
 	accepted    map[string]string
