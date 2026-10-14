@@ -38,7 +38,7 @@ func TestWorkflowDurableContracts(t *testing.T) {
 	exec("CREATE SCHEMA " + schema)
 	defer c.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE")
 	exec("SET search_path TO " + schema)
-	exec("CREATE TABLE issue(id UUID PRIMARY KEY, origin_type TEXT); CREATE TABLE agent_task_queue(id UUID PRIMARY KEY)")
+	exec("CREATE TABLE issue(id UUID PRIMARY KEY, origin_type TEXT); CREATE TABLE agent_task_queue(id UUID PRIMARY KEY); CREATE TABLE member(workspace_id UUID NOT NULL,user_id UUID NOT NULL)")
 	files, err := filepath.Glob("../../migrations/*.up.sql")
 	if err != nil {
 		t.Fatal(err)
@@ -46,7 +46,7 @@ func TestWorkflowDurableContracts(t *testing.T) {
 	sort.Strings(files)
 	var applied []string
 	for _, file := range files {
-		if filepath.Base(file) < "564_" || filepath.Base(file) >= "596_" {
+		if filepath.Base(file) < "564_" || filepath.Base(file) >= "597_" {
 			continue
 		}
 		b, err := os.ReadFile(file)
@@ -66,6 +66,7 @@ func TestWorkflowDurableContracts(t *testing.T) {
 	u := func(s string) pgtype.UUID { return pgtype.UUID{Bytes: uuid.MustParse(s), Valid: true} }
 	q := db.New(c)
 	exec(fmt.Sprintf("INSERT INTO workflow(id,workspace_id,name,slug,created_by_type,created_by_id) VALUES ('%s','%s','test','test','member','%s')", wf, ws, principal))
+	exec(fmt.Sprintf("INSERT INTO member(workspace_id,user_id) VALUES ('%s','%s')", ws, principal))
 	t.Run("immutable revisions and increasing version", func(t *testing.T) {
 		exec(fmt.Sprintf("INSERT INTO workflow_revision(id,workspace_id,workflow_id,version,definition,definition_hash,definition_graph,hatchet_name,created_by_id) VALUES ('%s','%s','%s',1,'source','hash','{}','engine-v1','%s')", rev, ws, wf, principal))
 		reject(fmt.Sprintf("UPDATE workflow_revision SET definition='changed' WHERE id='%s'", rev))

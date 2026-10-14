@@ -1820,7 +1820,10 @@ type WorkflowRun struct {
 	LogProjection        []byte             `json:"log_projection"`
 	StepProjection       []byte             `json:"step_projection"`
 	// Durable fair scan marker advanced atomically before engine requests; oldest attempted active rows receive the next bounded turn.
-	LastReconciledAt pgtype.Timestamptz `json:"last_reconciled_at"`
+	LastReconciledAt        pgtype.Timestamptz `json:"last_reconciled_at"`
+	PendingTerminalStatus   pgtype.Text        `json:"pending_terminal_status"`
+	PendingTerminalOutput   []byte             `json:"pending_terminal_output"`
+	FinalProjectionAttempts int32              `json:"final_projection_attempts"`
 }
 
 type WorkflowRunnerToken struct {

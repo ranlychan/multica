@@ -20,10 +20,11 @@ type WorkflowEngine interface {
 	Cancel(context.Context, db.WorkflowRun) error
 }
 type WorkflowEngineState struct {
-	Status string
-	Output json.RawMessage
-	Logs   []WorkflowLogEntry
-	Steps  json.RawMessage
+	Status         string
+	Output         json.RawMessage
+	Logs           []WorkflowLogEntry
+	LogsIncomplete bool
+	Steps          json.RawMessage
 }
 type RunIntent struct {
 	WorkspaceID pgtype.UUID
@@ -35,6 +36,7 @@ type RunIntent struct {
 const WorkflowEngineIdempotencyTTL = time.Hour
 const workflowSubmissionWindow = 55 * time.Minute
 const workflowRequestTimeout = 30 * time.Second
+const workflowFinalProjectionMaxAttempts = 3
 
 func (s *WorkflowService) runnable(ctx context.Context, ws, rev pgtype.UUID) bool {
 	return s.Ready != nil && s.Ready() && s.Eligible != nil && s.Eligible(ctx, ws, rev)
@@ -132,6 +134,15 @@ func (s *WorkflowService) SubmitRun(ctx context.Context, intent RunIntent) (db.W
 		}
 		return r, nil
 	}
+	if r.Status == "queued" {
+		skipped, skipErr := s.Queries.SkipDepartedUnsubmittedWorkflowRun(ctx, db.SkipDepartedUnsubmittedWorkflowRunParams{ID: r.ID, WorkspaceID: r.WorkspaceID})
+		if skipErr == nil {
+			return skipped, nil
+		}
+		if !errors.Is(skipErr, pgx.ErrNoRows) {
+			return r, skipErr
+		}
+	}
 	rev, e := s.Queries.GetWorkflowRevisionInWorkspace(ctx, db.GetWorkflowRevisionInWorkspaceParams{ID: r.RevisionID, WorkspaceID: r.WorkspaceID})
 	if e != nil {
 		return r, e
@@ -144,13 +155,21 @@ func (s *WorkflowService) SubmitRun(ctx context.Context, intent RunIntent) (db.W
 		if e != nil {
 			return r, e
 		}
-		r, e = s.Queries.BeginWorkflowRunSubmission(ctx, db.BeginWorkflowRunSubmissionParams{ID: r.ID, WorkspaceID: r.WorkspaceID, SubmissionStartedAt: now, SubmissionDeadline: pgtype.Timestamptz{Time: now.Time.Add(workflowSubmissionWindow), Valid: true}})
+		started, e := s.Queries.BeginWorkflowRunSubmission(ctx, db.BeginWorkflowRunSubmissionParams{ID: r.ID, WorkspaceID: r.WorkspaceID, SubmissionStartedAt: now, SubmissionDeadline: pgtype.Timestamptz{Time: now.Time.Add(workflowSubmissionWindow), Valid: true}})
 		if errors.Is(e, pgx.ErrNoRows) {
+			skipped, skipErr := s.Queries.SkipDepartedUnsubmittedWorkflowRun(ctx, db.SkipDepartedUnsubmittedWorkflowRunParams{ID: r.ID, WorkspaceID: r.WorkspaceID})
+			if skipErr == nil {
+				return skipped, nil
+			}
+			if !errors.Is(skipErr, pgx.ErrNoRows) {
+				return r, skipErr
+			}
 			return s.Queries.GetWorkflowRunInWorkspace(ctx, db.GetWorkflowRunInWorkspaceParams{ID: intent.RunID, WorkspaceID: intent.WorkspaceID})
 		}
 		if e != nil {
 			return r, e
 		}
+		r = started
 	} else {
 		requestCtx, cancel := context.WithTimeout(ctx, workflowRequestTimeout)
 		engineID, e := s.Engine.Discover(requestCtx, r)
@@ -205,16 +224,24 @@ func (s *WorkflowService) ReconcileRuns(ctx context.Context, ws pgtype.UUID, lim
 	if limit < 1 || limit > WorkflowMaxPageSize {
 		limit = WorkflowMaxPageSize
 	}
-	// Advance a durable oldest-attempted marker before external requests. Crashes,
-	// unavailable engines and long-lived runs yield their turn to later rows.
-	runs, e := s.Queries.ClaimWorkflowRunsToReconcile(ctx, db.ClaimWorkflowRunsToReconcileParams{WorkspaceID: ws, Limit: limit})
+	cutoff, e := s.Queries.WorkflowDatabaseTime(ctx)
 	if e != nil {
 		return e
 	}
-	for _, r := range runs {
+	for i := int32(0); i < limit; i++ {
 		if e = ctx.Err(); e != nil {
 			return e
 		}
+		// Claim one row immediately before its attempt. The cutoff excludes rows
+		// already marked in this invocation, including after a short or failed call.
+		runs, claimErr := s.Queries.ClaimWorkflowRunsToReconcile(ctx, db.ClaimWorkflowRunsToReconcileParams{WorkspaceID: ws, Limit: 1, LastReconciledAt: cutoff})
+		if claimErr != nil {
+			return claimErr
+		}
+		if len(runs) == 0 {
+			break
+		}
+		r := runs[0]
 		if r.Status == "queued" {
 			if _, e = s.SubmitRun(ctx, RunIntent{WorkspaceID: ws, RunID: r.ID}); e != nil {
 				return e
@@ -222,6 +249,11 @@ func (s *WorkflowService) ReconcileRuns(ctx context.Context, ws pgtype.UUID, lim
 			continue
 		}
 		if s.Engine == nil || s.Ready == nil || !s.Ready() {
+			if r.PendingTerminalStatus.Valid {
+				if e = s.retryPendingWorkflowTerminal(ctx, r, "", nil); e != nil {
+					return e
+				}
+			}
 			continue
 		}
 		if !r.HatchetRunID.Valid {
@@ -254,22 +286,80 @@ func (s *WorkflowService) ReconcileRuns(ctx context.Context, ws pgtype.UUID, lim
 		state, err := s.Engine.Inspect(requestCtx, r)
 		cancel()
 		if err != nil {
+			if r.PendingTerminalStatus.Valid {
+				if e = s.retryPendingWorkflowTerminal(ctx, r, "", nil); e != nil {
+					return e
+				}
+			}
+			continue
+		}
+		steps := sanitizeWorkflowSteps(state.Steps)
+		terminal := map[string]string{"COMPLETED": "completed", "FAILED": "failed", "CANCELLED": "cancelled"}[state.Status]
+		if state.LogsIncomplete {
+			r, e = s.Queries.ProjectWorkflowSteps(ctx, db.ProjectWorkflowStepsParams{ID: r.ID, WorkspaceID: ws, StepProjection: steps})
+			if errors.Is(e, pgx.ErrNoRows) {
+				continue
+			}
+			if e != nil {
+				return e
+			}
+			if terminal != "" || r.PendingTerminalStatus.Valid {
+				if e = s.retryPendingWorkflowTerminal(ctx, r, terminal, SanitizeWorkflowInput(state.Output)); e != nil {
+					return e
+				}
+			}
 			continue
 		}
 		logs, _ := json.Marshal(SanitizeWorkflowLogs(state.Logs))
-		steps := sanitizeWorkflowSteps(state.Steps)
-		if _, e = s.Queries.ProjectWorkflowRun(ctx, db.ProjectWorkflowRunParams{ID: r.ID, WorkspaceID: ws, LogProjection: logs, StepProjection: steps}); e != nil && !errors.Is(e, pgx.ErrNoRows) {
-			return e
-		}
-		terminal := map[string]string{"COMPLETED": "completed", "FAILED": "failed", "CANCELLED": "cancelled"}[state.Status]
-		if terminal == "" {
+		r, e = s.Queries.ProjectWorkflowRun(ctx, db.ProjectWorkflowRunParams{ID: r.ID, WorkspaceID: ws, LogProjection: logs, StepProjection: steps})
+		if errors.Is(e, pgx.ErrNoRows) {
 			continue
 		}
-		if _, e = s.Queries.FinishWorkflowRunCAS(ctx, db.FinishWorkflowRunCASParams{ID: r.ID, WorkspaceID: ws, Status: terminal, Status_2: "running", Output: SanitizeWorkflowInput(state.Output)}); e != nil && !errors.Is(e, pgx.ErrNoRows) {
+		if e != nil {
 			return e
+		}
+		if terminal != "" || r.PendingTerminalStatus.Valid {
+			if e = s.finishWorkflowTerminal(ctx, r, terminal, SanitizeWorkflowInput(state.Output), false); e != nil {
+				return e
+			}
 		}
 	}
 	return nil
+}
+
+func (s *WorkflowService) retryPendingWorkflowTerminal(ctx context.Context, r db.WorkflowRun, status string, output json.RawMessage) error {
+	var e error
+	if status != "" {
+		r, e = s.Queries.StageWorkflowTerminalProjection(ctx, db.StageWorkflowTerminalProjectionParams{ID: r.ID, WorkspaceID: r.WorkspaceID, TerminalStatus: status, TerminalOutput: output})
+	} else {
+		r, e = s.Queries.AdvanceWorkflowTerminalProjectionRetry(ctx, db.AdvanceWorkflowTerminalProjectionRetryParams{ID: r.ID, WorkspaceID: r.WorkspaceID})
+	}
+	if errors.Is(e, pgx.ErrNoRows) {
+		return nil
+	}
+	if e != nil {
+		return e
+	}
+	if r.FinalProjectionAttempts < workflowFinalProjectionMaxAttempts {
+		return nil
+	}
+	return s.finishWorkflowTerminal(ctx, r, "", nil, true)
+}
+
+func (s *WorkflowService) finishWorkflowTerminal(ctx context.Context, r db.WorkflowRun, status string, output json.RawMessage, logsIncomplete bool) error {
+	if r.PendingTerminalStatus.Valid {
+		status = r.PendingTerminalStatus.String
+		output = r.PendingTerminalOutput
+	}
+	reason := pgtype.Text{}
+	if logsIncomplete {
+		reason = pgtype.Text{String: "workflow_final_logs_incomplete", Valid: true}
+	}
+	_, e := s.Queries.FinishWorkflowRunCAS(ctx, db.FinishWorkflowRunCASParams{ID: r.ID, WorkspaceID: r.WorkspaceID, Status: status, Status_2: "running", Output: output, ReasonCode: reason})
+	if errors.Is(e, pgx.ErrNoRows) {
+		return nil
+	}
+	return e
 }
 
 // WorkflowRunStep is the public product projection; IDs are authored graph

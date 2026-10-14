@@ -137,6 +137,54 @@ func TestWorkflowScheduleManualRequiresWorkspaceEligibility(t *testing.T) {
 	}
 }
 
+func TestWorkflowScheduleDepartureAfterCommittedIntentSkipsBeforeSubmission(t *testing.T) {
+	s, w, _ := workflowRuntimeFixture(t)
+	ctx := context.Background()
+	engine := &workflowEngineFixture{accepted: map[string]string{}, status: "RUNNING"}
+	s.Engine = engine
+	runs, e := s.ClaimScheduledRuns(ctx, w.WorkspaceID, time.Now(), 100)
+	if e != nil || len(runs) != 1 || runs[0].Status != "queued" {
+		t.Fatalf("committed intent: %+v %v", runs, e)
+	}
+	if _, e = testPool.Exec(ctx, "DELETE FROM member WHERE workspace_id=$1 AND user_id=$2", w.WorkspaceID, runs[0].PrincipalUserID); e != nil {
+		t.Fatal(e)
+	}
+	if e = s.ReconcileRuns(ctx, w.WorkspaceID, 100); e != nil {
+		t.Fatal(e)
+	}
+	run, e := s.Queries.GetWorkflowRunInWorkspace(ctx, db.GetWorkflowRunInWorkspaceParams{ID: runs[0].ID, WorkspaceID: w.WorkspaceID})
+	if e != nil || run.Status != "skipped" || run.ReasonCode.String != "workflow_principal_departed" || run.SubmissionStartedAt.Valid || engine.submissions != 0 || engine.discoveries != 0 {
+		t.Fatalf("departed principal reached engine: %+v submissions=%d discoveries=%d %v", run, engine.submissions, engine.discoveries, e)
+	}
+}
+
+func TestWorkflowScheduleDepartureDuringSubmissionClaimSkipsAtomically(t *testing.T) {
+	s, w, _ := workflowRuntimeFixture(t)
+	ctx := context.Background()
+	engine := &workflowEngineFixture{accepted: map[string]string{}, status: "RUNNING"}
+	s.Engine = engine
+	runs, e := s.ClaimScheduledRuns(ctx, w.WorkspaceID, time.Now(), 100)
+	if e != nil || len(runs) != 1 {
+		t.Fatal(e)
+	}
+	removed := false
+	eligibleCalled := false
+	s.Ready = func() bool {
+		if !removed {
+			removed = true
+			if _, removeErr := testPool.Exec(ctx, "DELETE FROM member WHERE workspace_id=$1 AND user_id=$2", w.WorkspaceID, runs[0].PrincipalUserID); removeErr != nil {
+				t.Fatal(removeErr)
+			}
+		}
+		return true
+	}
+	s.Eligible = func(context.Context, pgtype.UUID, pgtype.UUID) bool { eligibleCalled = true; return true }
+	run, e := s.SubmitRun(ctx, service.RunIntent{WorkspaceID: w.WorkspaceID, RunID: runs[0].ID})
+	if e != nil || !removed || run.Status != "skipped" || run.ReasonCode.String != "workflow_principal_departed" || run.SubmissionStartedAt.Valid || engine.submissions != 0 || engine.discoveries != 0 {
+		t.Fatalf("principal left between precheck and atomic submission claim: %+v submissions=%d discoveries=%d eligible_called=%v %v", run, engine.submissions, engine.discoveries, eligibleCalled, e)
+	}
+}
+
 func TestWorkflowScheduleDefersUnpublishedWithoutPoisoningPublishedTrigger(t *testing.T) {
 	s, w, tr := workflowRuntimeFixture(t)
 	ctx := context.Background()

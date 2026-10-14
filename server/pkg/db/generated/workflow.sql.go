@@ -13,7 +13,7 @@ import (
 
 const acknowledgeWorkflowRun = `-- name: AcknowledgeWorkflowRun :one
 UPDATE workflow_run SET status='running',hatchet_run_id=$3,started_at=now()
-WHERE id=$1 AND workspace_id=$2 AND status='submitting' RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at
+WHERE id=$1 AND workspace_id=$2 AND status='submitting' RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at, pending_terminal_status, pending_terminal_output, final_projection_attempts
 `
 
 type AcknowledgeWorkflowRunParams struct {
@@ -61,13 +61,16 @@ func (q *Queries) AcknowledgeWorkflowRun(ctx context.Context, arg AcknowledgeWor
 		&i.LogProjection,
 		&i.StepProjection,
 		&i.LastReconciledAt,
+		&i.PendingTerminalStatus,
+		&i.PendingTerminalOutput,
+		&i.FinalProjectionAttempts,
 	)
 	return i, err
 }
 
 const acknowledgeWorkflowSubmissionAttempt = `-- name: AcknowledgeWorkflowSubmissionAttempt :one
 UPDATE workflow_run SET status='running',hatchet_run_id=$3,started_at=now()
-WHERE id=$1 AND workspace_id=$2 AND status='submitting' AND submission_attempts=$4 AND submission_lease_until>now() RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at
+WHERE id=$1 AND workspace_id=$2 AND status='submitting' AND submission_attempts=$4 AND submission_lease_until>now() RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at, pending_terminal_status, pending_terminal_output, final_projection_attempts
 `
 
 type AcknowledgeWorkflowSubmissionAttemptParams struct {
@@ -121,6 +124,9 @@ func (q *Queries) AcknowledgeWorkflowSubmissionAttempt(ctx context.Context, arg 
 		&i.LogProjection,
 		&i.StepProjection,
 		&i.LastReconciledAt,
+		&i.PendingTerminalStatus,
+		&i.PendingTerminalOutput,
+		&i.FinalProjectionAttempts,
 	)
 	return i, err
 }
@@ -155,6 +161,62 @@ func (q *Queries) AddWorkflowCollaborator(ctx context.Context, arg AddWorkflowCo
 		&i.Role,
 		&i.CreatedByID,
 		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const advanceWorkflowTerminalProjectionRetry = `-- name: AdvanceWorkflowTerminalProjectionRetry :one
+UPDATE workflow_run SET final_projection_attempts=final_projection_attempts+1
+WHERE id=$1 AND workspace_id=$2 AND status='running' AND pending_terminal_status IS NOT NULL RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at, pending_terminal_status, pending_terminal_output, final_projection_attempts
+`
+
+type AdvanceWorkflowTerminalProjectionRetryParams struct {
+	ID          pgtype.UUID `json:"id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) AdvanceWorkflowTerminalProjectionRetry(ctx context.Context, arg AdvanceWorkflowTerminalProjectionRetryParams) (WorkflowRun, error) {
+	row := q.db.QueryRow(ctx, advanceWorkflowTerminalProjectionRetry, arg.ID, arg.WorkspaceID)
+	var i WorkflowRun
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.WorkflowID,
+		&i.RevisionID,
+		&i.DefinitionHash,
+		&i.PrincipalUserID,
+		&i.TriggerID,
+		&i.Source,
+		&i.Status,
+		&i.PlannedAt,
+		&i.IdempotencyKey,
+		&i.SubmissionStartedAt,
+		&i.SubmissionDeadline,
+		&i.HatchetRunID,
+		&i.Input,
+		&i.Output,
+		&i.IssueID,
+		&i.TaskID,
+		&i.OriginatorUserID,
+		&i.AccountableUserID,
+		&i.OriginatorSource,
+		&i.ReasonCode,
+		&i.FailureReason,
+		&i.TriggeredAt,
+		&i.StartedAt,
+		&i.FinishedAt,
+		&i.DurationMs,
+		&i.CreatedAt,
+		&i.CancelRequestedAt,
+		&i.CancelRequestedByID,
+		&i.SubmissionAttempts,
+		&i.SubmissionLeaseUntil,
+		&i.LogProjection,
+		&i.StepProjection,
+		&i.LastReconciledAt,
+		&i.PendingTerminalStatus,
+		&i.PendingTerminalOutput,
+		&i.FinalProjectionAttempts,
 	)
 	return i, err
 }
@@ -204,10 +266,11 @@ func (q *Queries) AdvanceWorkflowTriggerCAS(ctx context.Context, arg AdvanceWork
 }
 
 const beginWorkflowRunSubmission = `-- name: BeginWorkflowRunSubmission :one
-UPDATE workflow_run SET status='submitting',submission_started_at=$3,submission_deadline=$4
-WHERE id=$1 AND workspace_id=$2 AND status='queued' AND submission_started_at IS NULL
-AND cancel_requested_at IS NULL
-AND $3::timestamptz IS NOT NULL AND $4::timestamptz IS NOT NULL AND $4::timestamptz>$3::timestamptz RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at
+UPDATE workflow_run r SET status='submitting',submission_started_at=$3,submission_deadline=$4
+WHERE r.id=$1 AND r.workspace_id=$2 AND r.status='queued' AND r.submission_started_at IS NULL
+AND r.cancel_requested_at IS NULL
+AND EXISTS (SELECT 1 FROM member m WHERE m.workspace_id=r.workspace_id AND m.user_id=r.principal_user_id)
+AND $3::timestamptz IS NOT NULL AND $4::timestamptz IS NOT NULL AND $4::timestamptz>$3::timestamptz RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at, pending_terminal_status, pending_terminal_output, final_projection_attempts
 `
 
 type BeginWorkflowRunSubmissionParams struct {
@@ -261,13 +324,16 @@ func (q *Queries) BeginWorkflowRunSubmission(ctx context.Context, arg BeginWorkf
 		&i.LogProjection,
 		&i.StepProjection,
 		&i.LastReconciledAt,
+		&i.PendingTerminalStatus,
+		&i.PendingTerminalOutput,
+		&i.FinalProjectionAttempts,
 	)
 	return i, err
 }
 
 const cancelUnsubmittedWorkflowRun = `-- name: CancelUnsubmittedWorkflowRun :one
 UPDATE workflow_run SET status='cancelled',finished_at=now()
-WHERE id=$1 AND workspace_id=$2 AND status='queued' AND submission_started_at IS NULL AND cancel_requested_at IS NOT NULL RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at
+WHERE id=$1 AND workspace_id=$2 AND status='queued' AND submission_started_at IS NULL AND cancel_requested_at IS NOT NULL RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at, pending_terminal_status, pending_terminal_output, final_projection_attempts
 `
 
 type CancelUnsubmittedWorkflowRunParams struct {
@@ -314,6 +380,9 @@ func (q *Queries) CancelUnsubmittedWorkflowRun(ctx context.Context, arg CancelUn
 		&i.LogProjection,
 		&i.StepProjection,
 		&i.LastReconciledAt,
+		&i.PendingTerminalStatus,
+		&i.PendingTerminalOutput,
+		&i.FinalProjectionAttempts,
 	)
 	return i, err
 }
@@ -348,10 +417,11 @@ func (q *Queries) ClaimWorkflowHatchetTenantDeletion(ctx context.Context, arg Cl
 }
 
 const claimWorkflowRunSubmissionAttempt = `-- name: ClaimWorkflowRunSubmissionAttempt :one
-UPDATE workflow_run SET submission_attempts=submission_attempts+1,submission_lease_until=now()+interval '45 seconds'
-WHERE id=$1 AND workspace_id=$2 AND status='submitting' AND hatchet_run_id IS NULL AND cancel_requested_at IS NULL
-AND submission_deadline>now()+interval '30 seconds' AND submission_attempts<5
-AND (submission_lease_until IS NULL OR submission_lease_until<=now()) RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at
+UPDATE workflow_run r SET submission_attempts=submission_attempts+1,submission_lease_until=now()+interval '45 seconds'
+WHERE r.id=$1 AND r.workspace_id=$2 AND r.status='submitting' AND r.hatchet_run_id IS NULL AND r.cancel_requested_at IS NULL
+AND r.submission_deadline>now()+interval '30 seconds' AND r.submission_attempts<5
+AND (r.submission_lease_until IS NULL OR r.submission_lease_until<=now())
+AND EXISTS (SELECT 1 FROM member m WHERE m.workspace_id=r.workspace_id AND m.user_id=r.principal_user_id) RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at, pending_terminal_status, pending_terminal_output, final_projection_attempts
 `
 
 type ClaimWorkflowRunSubmissionAttemptParams struct {
@@ -398,26 +468,31 @@ func (q *Queries) ClaimWorkflowRunSubmissionAttempt(ctx context.Context, arg Cla
 		&i.LogProjection,
 		&i.StepProjection,
 		&i.LastReconciledAt,
+		&i.PendingTerminalStatus,
+		&i.PendingTerminalOutput,
+		&i.FinalProjectionAttempts,
 	)
 	return i, err
 }
 
 const claimWorkflowRunsToReconcile = `-- name: ClaimWorkflowRunsToReconcile :many
 WITH candidates AS (
- SELECT id FROM workflow_run WHERE workspace_id=$1 AND status IN ('queued','submitting','running')
- ORDER BY last_reconciled_at,id LIMIT $2 FOR UPDATE SKIP LOCKED
+ SELECT wr.id FROM workflow_run wr WHERE wr.workspace_id=$1 AND wr.status IN ('queued','submitting','running')
+ AND wr.last_reconciled_at < $3
+ ORDER BY wr.last_reconciled_at,wr.id LIMIT $2 FOR UPDATE OF wr SKIP LOCKED
 )
 UPDATE workflow_run r SET last_reconciled_at=clock_timestamp()
-FROM candidates c WHERE r.id=c.id AND r.workspace_id=$1 RETURNING r.id, r.workspace_id, r.workflow_id, r.revision_id, r.definition_hash, r.principal_user_id, r.trigger_id, r.source, r.status, r.planned_at, r.idempotency_key, r.submission_started_at, r.submission_deadline, r.hatchet_run_id, r.input, r.output, r.issue_id, r.task_id, r.originator_user_id, r.accountable_user_id, r.originator_source, r.reason_code, r.failure_reason, r.triggered_at, r.started_at, r.finished_at, r.duration_ms, r.created_at, r.cancel_requested_at, r.cancel_requested_by_id, r.submission_attempts, r.submission_lease_until, r.log_projection, r.step_projection, r.last_reconciled_at
+FROM candidates c WHERE r.id=c.id AND r.workspace_id=$1 RETURNING r.id, r.workspace_id, r.workflow_id, r.revision_id, r.definition_hash, r.principal_user_id, r.trigger_id, r.source, r.status, r.planned_at, r.idempotency_key, r.submission_started_at, r.submission_deadline, r.hatchet_run_id, r.input, r.output, r.issue_id, r.task_id, r.originator_user_id, r.accountable_user_id, r.originator_source, r.reason_code, r.failure_reason, r.triggered_at, r.started_at, r.finished_at, r.duration_ms, r.created_at, r.cancel_requested_at, r.cancel_requested_by_id, r.submission_attempts, r.submission_lease_until, r.log_projection, r.step_projection, r.last_reconciled_at, r.pending_terminal_status, r.pending_terminal_output, r.final_projection_attempts
 `
 
 type ClaimWorkflowRunsToReconcileParams struct {
-	WorkspaceID pgtype.UUID `json:"workspace_id"`
-	Limit       int32       `json:"limit"`
+	WorkspaceID      pgtype.UUID        `json:"workspace_id"`
+	Limit            int32              `json:"limit"`
+	LastReconciledAt pgtype.Timestamptz `json:"last_reconciled_at"`
 }
 
 func (q *Queries) ClaimWorkflowRunsToReconcile(ctx context.Context, arg ClaimWorkflowRunsToReconcileParams) ([]WorkflowRun, error) {
-	rows, err := q.db.Query(ctx, claimWorkflowRunsToReconcile, arg.WorkspaceID, arg.Limit)
+	rows, err := q.db.Query(ctx, claimWorkflowRunsToReconcile, arg.WorkspaceID, arg.Limit, arg.LastReconciledAt)
 	if err != nil {
 		return nil, err
 	}
@@ -461,6 +536,9 @@ func (q *Queries) ClaimWorkflowRunsToReconcile(ctx context.Context, arg ClaimWor
 			&i.LogProjection,
 			&i.StepProjection,
 			&i.LastReconciledAt,
+			&i.PendingTerminalStatus,
+			&i.PendingTerminalOutput,
+			&i.FinalProjectionAttempts,
 		); err != nil {
 			return nil, err
 		}
@@ -704,7 +782,7 @@ func (q *Queries) CreateWorkflowRevision(ctx context.Context, arg CreateWorkflow
 const createWorkflowRun = `-- name: CreateWorkflowRun :one
 INSERT INTO workflow_run(id,workspace_id,workflow_id,revision_id,definition_hash,principal_user_id,trigger_id,source,planned_at,idempotency_key,input,status,reason_code,originator_user_id,accountable_user_id,originator_source)
 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$1,$10,$11,$12,$6,$6,$13)
-RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at
+RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at, pending_terminal_status, pending_terminal_output, final_projection_attempts
 `
 
 type CreateWorkflowRunParams struct {
@@ -776,6 +854,9 @@ func (q *Queries) CreateWorkflowRun(ctx context.Context, arg CreateWorkflowRunPa
 		&i.LogProjection,
 		&i.StepProjection,
 		&i.LastReconciledAt,
+		&i.PendingTerminalStatus,
+		&i.PendingTerminalOutput,
+		&i.FinalProjectionAttempts,
 	)
 	return i, err
 }
@@ -1008,7 +1089,7 @@ func (q *Queries) FinishWorkflowHatchetTenantDeletion(ctx context.Context, arg F
 const finishWorkflowRunCAS = `-- name: FinishWorkflowRunCAS :one
 UPDATE workflow_run SET status=$3,output=$4,reason_code=$5,failure_reason=$6,finished_at=now()
 WHERE id=$1 AND workspace_id=$2 AND status=$7 AND status IN ('queued','submitting','running')
-AND $3::text IN ('completed','failed','cancelled','skipped') RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at
+AND $3::text IN ('completed','failed','cancelled','skipped') RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at, pending_terminal_status, pending_terminal_output, final_projection_attempts
 `
 
 type FinishWorkflowRunCASParams struct {
@@ -1068,6 +1149,9 @@ func (q *Queries) FinishWorkflowRunCAS(ctx context.Context, arg FinishWorkflowRu
 		&i.LogProjection,
 		&i.StepProjection,
 		&i.LastReconciledAt,
+		&i.PendingTerminalStatus,
+		&i.PendingTerminalOutput,
+		&i.FinalProjectionAttempts,
 	)
 	return i, err
 }
@@ -1101,7 +1185,7 @@ func (q *Queries) GetActiveWorkflowRunnerToken(ctx context.Context, arg GetActiv
 }
 
 const getScheduledWorkflowRun = `-- name: GetScheduledWorkflowRun :one
-SELECT id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at FROM workflow_run WHERE trigger_id=$1 AND workspace_id=$2 AND planned_at=$3 AND source='schedule'
+SELECT id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at, pending_terminal_status, pending_terminal_output, final_projection_attempts FROM workflow_run WHERE trigger_id=$1 AND workspace_id=$2 AND planned_at=$3 AND source='schedule'
 `
 
 type GetScheduledWorkflowRunParams struct {
@@ -1149,6 +1233,9 @@ func (q *Queries) GetScheduledWorkflowRun(ctx context.Context, arg GetScheduledW
 		&i.LogProjection,
 		&i.StepProjection,
 		&i.LastReconciledAt,
+		&i.PendingTerminalStatus,
+		&i.PendingTerminalOutput,
+		&i.FinalProjectionAttempts,
 	)
 	return i, err
 }
@@ -1283,7 +1370,7 @@ func (q *Queries) GetWorkflowRevisionInWorkspace(ctx context.Context, arg GetWor
 }
 
 const getWorkflowRunByHatchetID = `-- name: GetWorkflowRunByHatchetID :one
-SELECT id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at FROM workflow_run WHERE hatchet_run_id=$1 AND workspace_id=$2
+SELECT id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at, pending_terminal_status, pending_terminal_output, final_projection_attempts FROM workflow_run WHERE hatchet_run_id=$1 AND workspace_id=$2
 `
 
 type GetWorkflowRunByHatchetIDParams struct {
@@ -1330,12 +1417,15 @@ func (q *Queries) GetWorkflowRunByHatchetID(ctx context.Context, arg GetWorkflow
 		&i.LogProjection,
 		&i.StepProjection,
 		&i.LastReconciledAt,
+		&i.PendingTerminalStatus,
+		&i.PendingTerminalOutput,
+		&i.FinalProjectionAttempts,
 	)
 	return i, err
 }
 
 const getWorkflowRunInWorkspace = `-- name: GetWorkflowRunInWorkspace :one
-SELECT id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at FROM workflow_run WHERE id=$1 AND workspace_id=$2
+SELECT id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at, pending_terminal_status, pending_terminal_output, final_projection_attempts FROM workflow_run WHERE id=$1 AND workspace_id=$2
 `
 
 type GetWorkflowRunInWorkspaceParams struct {
@@ -1382,6 +1472,9 @@ func (q *Queries) GetWorkflowRunInWorkspace(ctx context.Context, arg GetWorkflow
 		&i.LogProjection,
 		&i.StepProjection,
 		&i.LastReconciledAt,
+		&i.PendingTerminalStatus,
+		&i.PendingTerminalOutput,
+		&i.FinalProjectionAttempts,
 	)
 	return i, err
 }
@@ -1645,7 +1738,7 @@ func (q *Queries) ListWorkflowRevisionsPage(ctx context.Context, arg ListWorkflo
 }
 
 const listWorkflowRuns = `-- name: ListWorkflowRuns :many
-SELECT id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at FROM workflow_run WHERE workflow_id=$1 AND workspace_id=$2 ORDER BY triggered_at DESC LIMIT $3 OFFSET $4
+SELECT id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at, pending_terminal_status, pending_terminal_output, final_projection_attempts FROM workflow_run WHERE workflow_id=$1 AND workspace_id=$2 ORDER BY triggered_at DESC LIMIT $3 OFFSET $4
 `
 
 type ListWorkflowRunsParams struct {
@@ -1705,6 +1798,9 @@ func (q *Queries) ListWorkflowRuns(ctx context.Context, arg ListWorkflowRunsPara
 			&i.LogProjection,
 			&i.StepProjection,
 			&i.LastReconciledAt,
+			&i.PendingTerminalStatus,
+			&i.PendingTerminalOutput,
+			&i.FinalProjectionAttempts,
 		); err != nil {
 			return nil, err
 		}
@@ -1717,7 +1813,7 @@ func (q *Queries) ListWorkflowRuns(ctx context.Context, arg ListWorkflowRunsPara
 }
 
 const listWorkflowRunsToReconcile = `-- name: ListWorkflowRunsToReconcile :many
-SELECT id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at FROM workflow_run WHERE workspace_id=$1 AND status IN ('queued','submitting','running') ORDER BY triggered_at LIMIT $2
+SELECT id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at, pending_terminal_status, pending_terminal_output, final_projection_attempts FROM workflow_run WHERE workspace_id=$1 AND status IN ('queued','submitting','running') ORDER BY triggered_at LIMIT $2
 `
 
 type ListWorkflowRunsToReconcileParams struct {
@@ -1770,6 +1866,9 @@ func (q *Queries) ListWorkflowRunsToReconcile(ctx context.Context, arg ListWorkf
 			&i.LogProjection,
 			&i.StepProjection,
 			&i.LastReconciledAt,
+			&i.PendingTerminalStatus,
+			&i.PendingTerminalOutput,
+			&i.FinalProjectionAttempts,
 		); err != nil {
 			return nil, err
 		}
@@ -2086,7 +2185,7 @@ func (q *Queries) MarkWorkflowRevisionPublished(ctx context.Context, arg MarkWor
 
 const projectWorkflowRun = `-- name: ProjectWorkflowRun :one
 UPDATE workflow_run SET log_projection=$3,step_projection=$4
-WHERE id=$1 AND workspace_id=$2 AND status IN ('queued','submitting','running') RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at
+WHERE id=$1 AND workspace_id=$2 AND status IN ('queued','submitting','running') RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at, pending_terminal_status, pending_terminal_output, final_projection_attempts
 `
 
 type ProjectWorkflowRunParams struct {
@@ -2140,6 +2239,66 @@ func (q *Queries) ProjectWorkflowRun(ctx context.Context, arg ProjectWorkflowRun
 		&i.LogProjection,
 		&i.StepProjection,
 		&i.LastReconciledAt,
+		&i.PendingTerminalStatus,
+		&i.PendingTerminalOutput,
+		&i.FinalProjectionAttempts,
+	)
+	return i, err
+}
+
+const projectWorkflowSteps = `-- name: ProjectWorkflowSteps :one
+UPDATE workflow_run SET step_projection=$3
+WHERE id=$1 AND workspace_id=$2 AND status='running' RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at, pending_terminal_status, pending_terminal_output, final_projection_attempts
+`
+
+type ProjectWorkflowStepsParams struct {
+	ID             pgtype.UUID `json:"id"`
+	WorkspaceID    pgtype.UUID `json:"workspace_id"`
+	StepProjection []byte      `json:"step_projection"`
+}
+
+func (q *Queries) ProjectWorkflowSteps(ctx context.Context, arg ProjectWorkflowStepsParams) (WorkflowRun, error) {
+	row := q.db.QueryRow(ctx, projectWorkflowSteps, arg.ID, arg.WorkspaceID, arg.StepProjection)
+	var i WorkflowRun
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.WorkflowID,
+		&i.RevisionID,
+		&i.DefinitionHash,
+		&i.PrincipalUserID,
+		&i.TriggerID,
+		&i.Source,
+		&i.Status,
+		&i.PlannedAt,
+		&i.IdempotencyKey,
+		&i.SubmissionStartedAt,
+		&i.SubmissionDeadline,
+		&i.HatchetRunID,
+		&i.Input,
+		&i.Output,
+		&i.IssueID,
+		&i.TaskID,
+		&i.OriginatorUserID,
+		&i.AccountableUserID,
+		&i.OriginatorSource,
+		&i.ReasonCode,
+		&i.FailureReason,
+		&i.TriggeredAt,
+		&i.StartedAt,
+		&i.FinishedAt,
+		&i.DurationMs,
+		&i.CreatedAt,
+		&i.CancelRequestedAt,
+		&i.CancelRequestedByID,
+		&i.SubmissionAttempts,
+		&i.SubmissionLeaseUntil,
+		&i.LogProjection,
+		&i.StepProjection,
+		&i.LastReconciledAt,
+		&i.PendingTerminalStatus,
+		&i.PendingTerminalOutput,
+		&i.FinalProjectionAttempts,
 	)
 	return i, err
 }
@@ -2202,7 +2361,7 @@ func (q *Queries) QueueWorkflowHatchetTenantDeletion(ctx context.Context, worksp
 
 const requestWorkflowRunCancellation = `-- name: RequestWorkflowRunCancellation :one
 UPDATE workflow_run SET cancel_requested_at=now(),cancel_requested_by_id=$3
-WHERE id=$1 AND workspace_id=$2 AND status IN ('queued','submitting','running') AND cancel_requested_at IS NULL RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at
+WHERE id=$1 AND workspace_id=$2 AND status IN ('queued','submitting','running') AND cancel_requested_at IS NULL RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at, pending_terminal_status, pending_terminal_output, final_projection_attempts
 `
 
 type RequestWorkflowRunCancellationParams struct {
@@ -2250,6 +2409,9 @@ func (q *Queries) RequestWorkflowRunCancellation(ctx context.Context, arg Reques
 		&i.LogProjection,
 		&i.StepProjection,
 		&i.LastReconciledAt,
+		&i.PendingTerminalStatus,
+		&i.PendingTerminalOutput,
+		&i.FinalProjectionAttempts,
 	)
 	return i, err
 }
@@ -2369,6 +2531,130 @@ func (q *Queries) SetWorkflowRevisionValidation(ctx context.Context, arg SetWork
 		&i.AuditActorType,
 		&i.AuditActorID,
 		&i.ExpectedCurrentVersion,
+	)
+	return i, err
+}
+
+const skipDepartedUnsubmittedWorkflowRun = `-- name: SkipDepartedUnsubmittedWorkflowRun :one
+UPDATE workflow_run r SET status='skipped',reason_code='workflow_principal_departed',finished_at=now()
+WHERE r.id=$1 AND r.workspace_id=$2 AND r.status='queued' AND r.submission_started_at IS NULL
+AND NOT EXISTS (SELECT 1 FROM member m WHERE m.workspace_id=r.workspace_id AND m.user_id=r.principal_user_id)
+RETURNING r.id, r.workspace_id, r.workflow_id, r.revision_id, r.definition_hash, r.principal_user_id, r.trigger_id, r.source, r.status, r.planned_at, r.idempotency_key, r.submission_started_at, r.submission_deadline, r.hatchet_run_id, r.input, r.output, r.issue_id, r.task_id, r.originator_user_id, r.accountable_user_id, r.originator_source, r.reason_code, r.failure_reason, r.triggered_at, r.started_at, r.finished_at, r.duration_ms, r.created_at, r.cancel_requested_at, r.cancel_requested_by_id, r.submission_attempts, r.submission_lease_until, r.log_projection, r.step_projection, r.last_reconciled_at, r.pending_terminal_status, r.pending_terminal_output, r.final_projection_attempts
+`
+
+type SkipDepartedUnsubmittedWorkflowRunParams struct {
+	ID          pgtype.UUID `json:"id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) SkipDepartedUnsubmittedWorkflowRun(ctx context.Context, arg SkipDepartedUnsubmittedWorkflowRunParams) (WorkflowRun, error) {
+	row := q.db.QueryRow(ctx, skipDepartedUnsubmittedWorkflowRun, arg.ID, arg.WorkspaceID)
+	var i WorkflowRun
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.WorkflowID,
+		&i.RevisionID,
+		&i.DefinitionHash,
+		&i.PrincipalUserID,
+		&i.TriggerID,
+		&i.Source,
+		&i.Status,
+		&i.PlannedAt,
+		&i.IdempotencyKey,
+		&i.SubmissionStartedAt,
+		&i.SubmissionDeadline,
+		&i.HatchetRunID,
+		&i.Input,
+		&i.Output,
+		&i.IssueID,
+		&i.TaskID,
+		&i.OriginatorUserID,
+		&i.AccountableUserID,
+		&i.OriginatorSource,
+		&i.ReasonCode,
+		&i.FailureReason,
+		&i.TriggeredAt,
+		&i.StartedAt,
+		&i.FinishedAt,
+		&i.DurationMs,
+		&i.CreatedAt,
+		&i.CancelRequestedAt,
+		&i.CancelRequestedByID,
+		&i.SubmissionAttempts,
+		&i.SubmissionLeaseUntil,
+		&i.LogProjection,
+		&i.StepProjection,
+		&i.LastReconciledAt,
+		&i.PendingTerminalStatus,
+		&i.PendingTerminalOutput,
+		&i.FinalProjectionAttempts,
+	)
+	return i, err
+}
+
+const stageWorkflowTerminalProjection = `-- name: StageWorkflowTerminalProjection :one
+UPDATE workflow_run SET pending_terminal_status=COALESCE(pending_terminal_status,$3::text),
+ pending_terminal_output=COALESCE(pending_terminal_output,$4::jsonb),
+ final_projection_attempts=final_projection_attempts+1
+WHERE id=$1 AND workspace_id=$2 AND status='running'
+AND $3::text IN ('completed','failed','cancelled') RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at, pending_terminal_status, pending_terminal_output, final_projection_attempts
+`
+
+type StageWorkflowTerminalProjectionParams struct {
+	ID             pgtype.UUID `json:"id"`
+	WorkspaceID    pgtype.UUID `json:"workspace_id"`
+	TerminalStatus string      `json:"terminal_status"`
+	TerminalOutput []byte      `json:"terminal_output"`
+}
+
+func (q *Queries) StageWorkflowTerminalProjection(ctx context.Context, arg StageWorkflowTerminalProjectionParams) (WorkflowRun, error) {
+	row := q.db.QueryRow(ctx, stageWorkflowTerminalProjection,
+		arg.ID,
+		arg.WorkspaceID,
+		arg.TerminalStatus,
+		arg.TerminalOutput,
+	)
+	var i WorkflowRun
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.WorkflowID,
+		&i.RevisionID,
+		&i.DefinitionHash,
+		&i.PrincipalUserID,
+		&i.TriggerID,
+		&i.Source,
+		&i.Status,
+		&i.PlannedAt,
+		&i.IdempotencyKey,
+		&i.SubmissionStartedAt,
+		&i.SubmissionDeadline,
+		&i.HatchetRunID,
+		&i.Input,
+		&i.Output,
+		&i.IssueID,
+		&i.TaskID,
+		&i.OriginatorUserID,
+		&i.AccountableUserID,
+		&i.OriginatorSource,
+		&i.ReasonCode,
+		&i.FailureReason,
+		&i.TriggeredAt,
+		&i.StartedAt,
+		&i.FinishedAt,
+		&i.DurationMs,
+		&i.CreatedAt,
+		&i.CancelRequestedAt,
+		&i.CancelRequestedByID,
+		&i.SubmissionAttempts,
+		&i.SubmissionLeaseUntil,
+		&i.LogProjection,
+		&i.StepProjection,
+		&i.LastReconciledAt,
+		&i.PendingTerminalStatus,
+		&i.PendingTerminalOutput,
+		&i.FinalProjectionAttempts,
 	)
 	return i, err
 }

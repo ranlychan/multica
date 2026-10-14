@@ -79,27 +79,47 @@ SELECT * FROM workflow_run WHERE workflow_id=$1 AND workspace_id=$2 ORDER BY tri
 SELECT * FROM workflow_run WHERE workspace_id=$1 AND status IN ('queued','submitting','running') ORDER BY triggered_at LIMIT $2;
 -- name: ClaimWorkflowRunsToReconcile :many
 WITH candidates AS (
- SELECT id FROM workflow_run WHERE workspace_id=$1 AND status IN ('queued','submitting','running')
- ORDER BY last_reconciled_at,id LIMIT $2 FOR UPDATE SKIP LOCKED
+ SELECT wr.id FROM workflow_run wr WHERE wr.workspace_id=$1 AND wr.status IN ('queued','submitting','running')
+ AND wr.last_reconciled_at < $3
+ ORDER BY wr.last_reconciled_at,wr.id LIMIT $2 FOR UPDATE OF wr SKIP LOCKED
 )
 UPDATE workflow_run r SET last_reconciled_at=clock_timestamp()
 FROM candidates c WHERE r.id=c.id AND r.workspace_id=$1 RETURNING r.*;
+-- name: SkipDepartedUnsubmittedWorkflowRun :one
+UPDATE workflow_run r SET status='skipped',reason_code='workflow_principal_departed',finished_at=now()
+WHERE r.id=$1 AND r.workspace_id=$2 AND r.status='queued' AND r.submission_started_at IS NULL
+AND NOT EXISTS (SELECT 1 FROM member m WHERE m.workspace_id=r.workspace_id AND m.user_id=r.principal_user_id)
+RETURNING r.*;
 -- name: BeginWorkflowRunSubmission :one
-UPDATE workflow_run SET status='submitting',submission_started_at=$3,submission_deadline=$4
-WHERE id=$1 AND workspace_id=$2 AND status='queued' AND submission_started_at IS NULL
-AND cancel_requested_at IS NULL
+UPDATE workflow_run r SET status='submitting',submission_started_at=$3,submission_deadline=$4
+WHERE r.id=$1 AND r.workspace_id=$2 AND r.status='queued' AND r.submission_started_at IS NULL
+AND r.cancel_requested_at IS NULL
+AND EXISTS (SELECT 1 FROM member m WHERE m.workspace_id=r.workspace_id AND m.user_id=r.principal_user_id)
 AND $3::timestamptz IS NOT NULL AND $4::timestamptz IS NOT NULL AND $4::timestamptz>$3::timestamptz RETURNING *;
 -- name: ClaimWorkflowRunSubmissionAttempt :one
-UPDATE workflow_run SET submission_attempts=submission_attempts+1,submission_lease_until=now()+interval '45 seconds'
-WHERE id=$1 AND workspace_id=$2 AND status='submitting' AND hatchet_run_id IS NULL AND cancel_requested_at IS NULL
-AND submission_deadline>now()+interval '30 seconds' AND submission_attempts<5
-AND (submission_lease_until IS NULL OR submission_lease_until<=now()) RETURNING *;
+UPDATE workflow_run r SET submission_attempts=submission_attempts+1,submission_lease_until=now()+interval '45 seconds'
+WHERE r.id=$1 AND r.workspace_id=$2 AND r.status='submitting' AND r.hatchet_run_id IS NULL AND r.cancel_requested_at IS NULL
+AND r.submission_deadline>now()+interval '30 seconds' AND r.submission_attempts<5
+AND (r.submission_lease_until IS NULL OR r.submission_lease_until<=now())
+AND EXISTS (SELECT 1 FROM member m WHERE m.workspace_id=r.workspace_id AND m.user_id=r.principal_user_id) RETURNING *;
 -- name: CancelUnsubmittedWorkflowRun :one
 UPDATE workflow_run SET status='cancelled',finished_at=now()
 WHERE id=$1 AND workspace_id=$2 AND status='queued' AND submission_started_at IS NULL AND cancel_requested_at IS NOT NULL RETURNING *;
 -- name: ProjectWorkflowRun :one
 UPDATE workflow_run SET log_projection=$3,step_projection=$4
 WHERE id=$1 AND workspace_id=$2 AND status IN ('queued','submitting','running') RETURNING *;
+-- name: ProjectWorkflowSteps :one
+UPDATE workflow_run SET step_projection=$3
+WHERE id=$1 AND workspace_id=$2 AND status='running' RETURNING *;
+-- name: StageWorkflowTerminalProjection :one
+UPDATE workflow_run SET pending_terminal_status=COALESCE(pending_terminal_status,sqlc.arg('terminal_status')::text),
+ pending_terminal_output=COALESCE(pending_terminal_output,sqlc.arg('terminal_output')::jsonb),
+ final_projection_attempts=final_projection_attempts+1
+WHERE id=$1 AND workspace_id=$2 AND status='running'
+AND sqlc.arg('terminal_status')::text IN ('completed','failed','cancelled') RETURNING *;
+-- name: AdvanceWorkflowTerminalProjectionRetry :one
+UPDATE workflow_run SET final_projection_attempts=final_projection_attempts+1
+WHERE id=$1 AND workspace_id=$2 AND status='running' AND pending_terminal_status IS NOT NULL RETURNING *;
 -- name: ListWorkflowRuntimeWorkspaces :many
 SELECT DISTINCT workspace_id FROM workflow_run WHERE status IN ('queued','submitting','running')
 UNION SELECT DISTINCT workspace_id FROM workflow_trigger WHERE enabled AND kind='schedule';

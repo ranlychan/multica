@@ -161,6 +161,7 @@ func (e *workflowHatchetEngine) Inspect(ctx context.Context, r db.WorkflowRun) (
 		}
 		logsRaw, logErr := e.client.Logs(ctx, cred, task.TaskID, service.WorkflowMaxLogEntries)
 		if logErr != nil {
+			state.LogsIncomplete = true
 			continue
 		}
 		var logs struct {
@@ -171,6 +172,7 @@ func (e *workflowHatchetEngine) Inspect(ctx context.Context, r db.WorkflowRun) (
 			} `json:"rows"`
 		}
 		if json.Unmarshal(logsRaw, &logs) != nil {
+			state.LogsIncomplete = true
 			continue
 		}
 		for _, log := range logs.Rows {
