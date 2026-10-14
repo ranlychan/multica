@@ -170,7 +170,7 @@ func (s *WorkflowService) SubmitRun(ctx context.Context, intent RunIntent) (db.W
 			return r, e
 		}
 		r = started
-	} else {
+	} else if r.SubmissionAttempts > 0 {
 		requestCtx, cancel := context.WithTimeout(ctx, workflowRequestTimeout)
 		engineID, e := s.Engine.Discover(requestCtx, r)
 		cancel()
@@ -259,24 +259,10 @@ func (s *WorkflowService) ReconcileRuns(ctx context.Context, ws pgtype.UUID, lim
 			continue
 		}
 		if r.Status == "submitting" && r.SubmissionAttempts == 0 {
-			_, skipErr := s.Queries.SkipDepartedUnsubmittedWorkflowRun(ctx, db.SkipDepartedUnsubmittedWorkflowRunParams{ID: r.ID, WorkspaceID: ws})
-			if skipErr == nil {
-				continue
-			}
-			if !errors.Is(skipErr, pgx.ErrNoRows) {
-				return skipErr
-			}
-			r, e = s.Queries.GetWorkflowRunInWorkspace(ctx, db.GetWorkflowRunInWorkspaceParams{ID: r.ID, WorkspaceID: ws})
-			if errors.Is(e, pgx.ErrNoRows) {
-				continue
-			}
-			if e != nil {
+			if _, e = s.SubmitRun(ctx, RunIntent{WorkspaceID: ws, RunID: r.ID}); e != nil {
 				return e
 			}
-			if r.Status != "submitting" {
-				continue
-			}
-			r.LastReconciledAt = claimedAt
+			continue
 		}
 		if s.Engine == nil || s.Ready == nil || !s.Ready() {
 			if r.PendingTerminalStatus.Valid {

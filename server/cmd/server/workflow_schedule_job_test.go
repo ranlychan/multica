@@ -229,6 +229,58 @@ func TestWorkflowScheduleDepartureAfterBeginBeforeFirstAttemptSkipsWithoutEngine
 	}
 }
 
+func TestWorkflowScheduleDepartureDuringReadinessAfterBeginSkipsWithoutDiscovery(t *testing.T) {
+	for _, restart := range []bool{false, true} {
+		name := "direct_submit"
+		if restart {
+			name = "restarted_reconciler"
+		}
+		t.Run(name, func(t *testing.T) {
+			s, w, _ := workflowRuntimeFixture(t)
+			ctx := context.Background()
+			engine := &workflowEngineFixture{accepted: map[string]string{}, status: "RUNNING"}
+			s.Engine = engine
+			runs, e := s.ClaimScheduledRuns(ctx, w.WorkspaceID, time.Now(), 100)
+			if e != nil || len(runs) != 1 {
+				t.Fatalf("committed intent: %+v %v", runs, e)
+			}
+			now, e := s.Queries.WorkflowDatabaseTime(ctx)
+			if e != nil {
+				t.Fatal(e)
+			}
+			started, e := s.Queries.BeginWorkflowRunSubmission(ctx, db.BeginWorkflowRunSubmissionParams{ID: runs[0].ID, WorkspaceID: w.WorkspaceID, SubmissionStartedAt: now, SubmissionDeadline: pgtype.Timestamptz{Time: now.Time.Add(55 * time.Minute), Valid: true}})
+			if e != nil || started.Status != "submitting" || started.SubmissionAttempts != 0 {
+				t.Fatalf("durable pre-attempt gap: %+v %v", started, e)
+			}
+			removed := false
+			ready := func() bool {
+				if !removed {
+					removed = true
+					if _, removeErr := testPool.Exec(ctx, "DELETE FROM member WHERE workspace_id=$1 AND user_id=$2", w.WorkspaceID, started.PrincipalUserID); removeErr != nil {
+						t.Fatal(removeErr)
+					}
+				}
+				return true
+			}
+			if restart {
+				replica := service.NewWorkflowService(s.Queries, testPool)
+				replica.Ready, replica.Eligible, replica.Engine = ready, s.Eligible, engine
+				e = replica.ReconcileRuns(ctx, w.WorkspaceID, 100)
+			} else {
+				s.Ready = ready
+				_, e = s.SubmitRun(ctx, service.RunIntent{WorkspaceID: w.WorkspaceID, RunID: started.ID})
+			}
+			if e != nil {
+				t.Fatal(e)
+			}
+			run, e := s.Queries.GetWorkflowRunInWorkspace(ctx, db.GetWorkflowRunInWorkspaceParams{ID: started.ID, WorkspaceID: w.WorkspaceID})
+			if e != nil || !removed || run.Status != "skipped" || run.ReasonCode.String != "workflow_principal_departed" || run.SubmissionAttempts != 0 || !run.SubmissionStartedAt.Time.Equal(started.SubmissionStartedAt.Time) || !run.SubmissionDeadline.Time.Equal(started.SubmissionDeadline.Time) || engine.discoveries != 0 || engine.submissions != 0 {
+				t.Fatalf("departure during Ready contacted engine or lost immutable window: removed=%v status=%s reason=%s attempts=%d discoveries=%d submissions=%d %v", removed, run.Status, run.ReasonCode.String, run.SubmissionAttempts, engine.discoveries, engine.submissions, e)
+			}
+		})
+	}
+}
+
 func TestWorkflowScheduleDefersUnpublishedWithoutPoisoningPublishedTrigger(t *testing.T) {
 	s, w, tr := workflowRuntimeFixture(t)
 	ctx := context.Background()
