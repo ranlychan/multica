@@ -29,6 +29,26 @@ describe('definition', () => {
   });
 });
 describe('run-scoped operations', () => {
+  it('maps an upstream authored WorkflowError to a fixed transport code', async () => {
+    const malicious = new WorkflowError('/Users/private token=leaked');
+    const ctx = createWorkflowContext({ runId: 'r', stepId: 's', attempt: 0, input: null, parents: {}, transport: async () => { throw malicious; }, sleep: async () => {}, log: async () => {} });
+    await expect(ctx.issues.get('i')).rejects.toEqual(new WorkflowError('workflow_transport_unavailable'));
+    const known = new WorkflowError('workflow_operation_conflict');
+    known.message = '/srv/private token=leaked';
+    known.stack = '/srv/runner/private.ts';
+    const conflict = createWorkflowContext({ runId: 'r', stepId: 's', attempt: 0, input: null, parents: {}, transport: async () => { throw known; }, sleep: async () => {}, log: async () => {} });
+    await expect(conflict.issues.get('i')).rejects.toEqual(new WorkflowError('workflow_operation_conflict'));
+  });
+  it('redacts private paths and raw worker credentials through actual response and log boundaries', async () => {
+    const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZW5hbnQifQ.c2lnbmF0dXJl';
+    const pem = '-----BEGIN PRIVATE KEY-----\ncHJpdmF0ZS1rZXk=\n-----END PRIVATE KEY-----';
+    const secret = { unix: '/srv/workspace/private.pem', windows: 'C:\\workspace\\private.pem', unc: '\\\\host\\share\\private.pem', raw: jwt, pem, runner_token: 'opaque-runner-credential' };
+    const logs: unknown[] = [];
+    const ctx = createWorkflowContext({ runId: 'r', stepId: 's', attempt: 0, input: null, parents: {}, transport: async () => secret, sleep: async () => {}, log: async entry => { logs.push(entry); } });
+    expect(await ctx.issues.get('i')).toEqual({ unix: '[redacted]', windows: '[redacted]', unc: '[redacted]', raw: '[redacted]', pem: '[redacted]', runner_token: '[redacted]' });
+    await ctx.log('info', `private /srv/workspace/private.pem ${jwt} ${pem}`, secret);
+    expect(logs).toEqual([{ level: 'info', message: 'private [redacted] [redacted] [redacted]', fields: { unix: '[redacted]', windows: '[redacted]', unc: '[redacted]', raw: '[redacted]', pem: '[redacted]', runner_token: '[redacted]' } }]);
+  });
   it('waits for the author-selected issue status and exposes approved dispatch/run names', async () => {
     let polls = 0;
     const ctx = createWorkflowContext({ runId: 'r', stepId: 's', attempt: 0, input: {}, parents: {}, transport: async () => ({ status: ++polls === 1 ? 'in_progress' : 'review' }), sleep: async () => {}, log: async () => {} });

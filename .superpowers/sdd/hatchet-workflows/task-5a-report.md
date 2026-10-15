@@ -252,3 +252,124 @@ new runner's Vite optional esbuild peer mismatch; package builds/tests and actua
 esbuild execution passed with pinned0.25.12. Exact transitive lock differs from
 upstream source lock (e.g. grpc-js1.14.6/protobuf2.16.0); tested installed graph is
 the committed resolution, not an assertion of upstream lock equivalence.
+
+## Independent review fix round1
+
+Review of1ec9fa113 found two Important boundary leaks. Both were reproduced before
+production changes. This round changes only error-code propagation and defensive
+redaction plus covering tests; timeout latency accounting and the optional
+Vite/esbuild peer warning remain deferred as directed. No broad root test rerun.
+
+RED, from repository root:
+
+```text
+pnpm --filter @multica/workflow-sdk exec vitest run src/index.test.ts
+Test Files 1 failed (1); Tests 2 failed | 8 passed (10); exit1
+maps an upstream authored WorkflowError to a fixed transport code:
+  expected workflow_transport_unavailable
+  received /Users/private token=leaked in both message and code
+redacts private paths and raw worker credentials through actual response and log boundaries:
+  /srv/workspace/private.pem, UNC path, raw JWT, multiline PEM key survived
+  (ordinary Windows drive path and labelled runner_token were already redacted)
+```
+
+Added test-only immutable revision3 to the real packaged Node harness: authored
+code writes a structured log containing `/srv/...`, a bare JWT and runner_token;
+it either returns a private path/JWT result or throws public
+`new WorkflowError('/Users/private token=leaked')`. These exercise actual worker
+callbacks and persisted engine result/log/failure records, not a scrubber-only
+test or mocked engine.
+
+Two pre-fix live RED observations used the same opt-in command documented above:
+
+```text
+TestPackagedNodeWorkerLive FAIL38.92s:
+  actual engine run.output.value retained /srv/workspace/private.pem and bare JWT
+TestPackagedNodeWorkerLive FAIL37.99s:
+  actual run.errorMessage was JSON containing
+  {"message":"/Users/private token=leaked","stack":"Error: /Users/private token=leaked ... dist/worker.js:115:31 ..."}
+```
+
+The first authored-error assertion initially expected a plain code string; this
+observation established the native engine's JSON-wrapped message/stack shape.
+The final assertion parses that JSON and requires exactly
+`{message:"workflow_step_failed"}` for both run and task failures, with no stack.
+
+Fix: SDK keeps a private explicit set of permitted workflow codes and exports a
+boundary helper for the runner. Unknown/non-data codes map to fixed
+workflow_transport_unavailable or workflow_step_failed. The SDK reconstructs
+exceptions, retaining an allowlisted code but dropping an author's changed
+message/attached data; the regression also covers a known409 code with a malicious
+message/stack. Worker catches likewise reconstruct a fixed-code error and clear
+its stack because the upstream SDK otherwise serializes private runner paths.
+
+Redaction now recognizes ordinary absolute POSIX paths beyond selected roots,
+Windows drive/UNC paths, JWT-shaped raw tokens with object headers, multiline PEM
+private keys/certificates, existing bearer/prefixed credentials and sensitive JSON
+field names. SDK regressions exercise actual response return and log transport
+with POSIX, Windows, UNC, representative tenant-JWT form, opaque runner_token
+field and multiline private-key PEM. This is defensive recognition of these
+forms, not an OS sandbox or a general DLP guarantee for arbitrary opaque secrets
+placed under innocent field names. Authored code retains OS-user privileges.
+
+Fresh focused GREEN after these fixes:
+
+```text
+pnpm --filter @multica/workflow-sdk --filter @multica/workflow-runner test
+  SDK10 passed; runner9 passed (5 files /19 tests total), exit0
+pnpm --filter @multica/workflow-sdk --filter @multica/workflow-runner build
+  both tsc exit0
+pnpm --filter @multica/workflow-sdk --filter @multica/workflow-runner typecheck
+  both tsc --noEmit exit0
+git diff --check
+  no output, exit0
+```
+
+Self-review: propagated codes originate only in the fixed private set, arbitrary
+public WorkflowError instances are never forwarded intact, and worker failure
+JSON has no newly generated stack. Public result/log paths reuse the tested
+scrubber. No registry pin, graph/naming, descriptor, action-signing, definition
+surface or Go production change was made. Because worker execution boundaries
+changed, the full real packaged proof is rerun below before committing.
+
+Full real verification after the fix, command from `server/`:
+
+```text
+MULTICA_NODE_WORKER_LIVE=1 HATCHET_BIN_DIR=/tmp/multica-task5a-hatchet-bin GOPROXY=https://goproxy.cn,direct go test ./internal/hatchet -run '^TestPackagedNodeWorkerLive$' -count=1 -v
+{"event":"authored-boundaries","error":"workflow_step_failed","resultAndLogs":"redacted"}
+{"event":"outage-recovered","oldRunId":"2ceb9e18-c792-4dbd-a264-075491d5f50a", ... "attempt":0,"revision":1, ... "replayLogCount":2}
+{"event":"completed", ... "retryOutput":{"value":{"parent":{"attempt":1,"revision":2, ... },"revision":2}}, ... "ttlMs":3600000 ...}
+{"event":"network-after-execution","type":"network-proof","denied":2,"wire":0}
+{"event":"drained"}
+--- PASS: TestPackagedNodeWorkerLive (90.25s)
+PASS
+ok github.com/multica-ai/multica/server/internal/hatchet 90.684s
+```
+
+The actual authored failure run/task JSON was exactly the fixed message object,
+without stack; success result was `{value:{path:"[redacted]",raw:"[redacted]"}}`.
+Actual structured engine log records had message `private [redacted] [redacted]`
+and fields `{runner_token:"[redacted]"}`. Normal R1/R2 behavior, mTLS negative
+cases, acknowledged durable eviction + strict outage, retryCount1, parent output,
+immutable registration IDs/action aliases, idempotency and REST denial/drain all
+remained covered. Own disposable container/children were cleaned; shared Task3
+PostgreSQL retained. The archived registry pin was unchanged.
+
+An intermediate post-fix full run passed authored boundaries and old-revision
+outage recovery, then timed out90s waiting for the later deliberate retry
+(`TestPackagedNodeWorkerLive FAIL180.79s`). Its retry snapshot was not yet retained,
+so root cause is unknown; do not label it fixed or exempt it as proven preexisting.
+The diagnostic repeat adds last run/task/events and each durable wait snapshot on
+retry timeout. It passed with unchanged production code. Read-only exact-pin
+source inspection found `dispatcher/server.go:1632 handleTaskFailed` passes
+EventPayload as opaque text, with ShouldNotRetry handled separately; it does not
+parse stack. `controllers/task/controller.go:1553 pubRetryEvent` only describes
+backoff when the registered backoff fields are present. This supports avoiding a
+speculative stack/retry product fix; it does not establish the timeout's cause.
+No further full reruns or unrelated changes were made. Future failures now retain
+the missing retry diagnostic evidence.
+
+Round1 changed files: SDK index.ts/index.test.ts, runner worker.ts and test-only
+live-proof.mjs, and this report. The two reviewed Important leaks are covered by
+fresh SDK/real-engine evidence; intermittent live retry timing remains a reported
+verification concern for the controller's independent review.

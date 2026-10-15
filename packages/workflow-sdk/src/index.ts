@@ -6,6 +6,26 @@ export class WorkflowError extends Error {
   constructor(readonly code: string) { super(code); this.name = 'WorkflowError'; }
 }
 
+// The public error class is author-constructible. Its contents are not trusted
+// transport metadata; only these fixed codes may cross execution boundaries.
+const safeErrorCodes = new Set([
+  'workflow_action_failed', 'workflow_capability_revoked', 'workflow_drain_timeout',
+  'workflow_engine_rest_denied', 'workflow_forbidden', 'workflow_graph_mismatch',
+  'workflow_hash_mismatch', 'workflow_invalid_descriptor', 'workflow_invalid_duration',
+  'workflow_invalid_graph', 'workflow_invalid_import', 'workflow_invalid_log',
+  'workflow_invalid_operation_key', 'workflow_invalid_payload', 'workflow_invalid_response',
+  'workflow_invalid_source', 'workflow_invalid_status', 'workflow_log_limit',
+  'workflow_node_unavailable', 'workflow_not_found', 'workflow_operation_conflict',
+  'workflow_rate_limited', 'workflow_registration_mismatch', 'workflow_step_failed',
+  'workflow_transport_unavailable', 'workflow_unauthenticated', 'workflow_unavailable',
+  'workflow_validation_output_limit', 'workflow_validation_timeout',
+  'workflow_wait_failed', 'workflow_wait_timeout', 'workflow_worker_failed',
+]);
+export function safeWorkflowErrorCode(error: unknown, fallback: 'workflow_transport_unavailable' | 'workflow_step_failed'): string {
+  const code = error instanceof WorkflowError ? Object.getOwnPropertyDescriptor(error, 'code')?.value : undefined;
+  return typeof code === 'string' && safeErrorCodes.has(code) ? code : fallback;
+}
+
 export function validateJSON(value: unknown): JSONValue {
   const seen = new Set<object>();
   function visit(v: unknown, depth: number): void {
@@ -24,8 +44,10 @@ export function validateJSON(value: unknown): JSONValue {
 }
 
 export function redactText(text: string): string {
-  return text.replace(/Bearer\s+[^\s"<>]+|(?:wft_|mul_|mat_)[A-Za-z0-9_-]+|(?:password|secret|token|api[_-]?key)["']?\s*[:=]\s*["']?[^\s,"'<>]+/gi, '[redacted]')
-    .replace(/(?:[A-Za-z]:\\|\/(?:Users|home|tmp|private|etc|var|opt|root)\/)[^\s"<>]*/g, '[redacted]');
+  return text.replace(/-----BEGIN ([A-Z ]*(?:PRIVATE KEY|CERTIFICATE))-----[\s\S]*?-----END \1-----/g, '[redacted]')
+    .replace(/(?<![A-Za-z0-9_-])(?:eyJ[A-Za-z0-9_-]*|e30)\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?![A-Za-z0-9_-])/g, '[redacted]')
+    .replace(/Bearer\s+[^\s"<>]+|(?:wft_|mul_|mat_)[A-Za-z0-9_-]+|(?:password|secret|token|api[_-]?key)["']?\s*[:=]\s*["']?[^\s,"'<>]+/gi, '[redacted]')
+    .replace(/(?:[A-Za-z]:[\\/]|\\\\|(?<![\w:/])\/(?!\/))[^\s"'<>]*/g, '[redacted]');
 }
 export function redactJSON(value: JSONValue): JSONValue {
   if (typeof value === 'string') return redactText(value);
@@ -81,8 +103,7 @@ export function createWorkflowContext(runtime: RuntimeContext): WorkflowContext 
     try {
       return redactJSON(validateJSON(await runtime.transport({ protocol: 1, run_id: runtime.runId, step_id: runtime.stepId, attempt: runtime.attempt, operation, ...(key === undefined ? {} : { operation_key: operationKey(runtime.runId, runtime.stepId, key) }), payload })));
     } catch (err) {
-      if (err instanceof WorkflowError) throw err;
-      throw new WorkflowError('workflow_transport_unavailable');
+      throw new WorkflowError(safeWorkflowErrorCode(err, 'workflow_transport_unavailable'));
     }
   };
   const sleep = async (ms: number) => {

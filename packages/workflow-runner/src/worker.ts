@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { Hatchet, CreateWorkflow, type CreateWorkflowDurableTaskOpts } from '@hatchet-dev/typescript-sdk';
 import { createNodeTransport, type Transport } from '@hatchet-dev/typescript-sdk/clients/transport';
 import type { ClientConfig } from '@hatchet-dev/typescript-sdk/clients/hatchet-client';
-import { createWorkflowContext, validateJSON, redactJSON, WorkflowError, type JSONValue, type WorkflowDefinition } from '@multica/workflow-sdk';
+import { createWorkflowContext, validateJSON, redactJSON, safeWorkflowErrorCode, WorkflowError, type JSONValue, type WorkflowDefinition } from '@multica/workflow-sdk';
 import { loadDefinition } from './load.js';
 import { graphDigest, sourceHash } from './validate.js';
 import { createProductTransport, denyEngineREST, validateProductOrigin } from './transport.js';
@@ -97,7 +97,10 @@ export async function startWorker(descriptor: WorkerDescriptor, send: (message: 
           return { value: redactJSON(validateJSON(await step.run(context))) };
         } catch (error) {
           // Authored/upstream errors are never serialized back to engine or product.
-          throw new Error(error instanceof WorkflowError ? error.code : 'workflow_step_failed');
+          const failure = new Error(safeWorkflowErrorCode(error, 'workflow_step_failed'));
+          // The SDK serializes Error.stack into the engine failure payload.
+          failure.stack = undefined;
+          throw failure;
         }
       } });
       task.evictionPolicy = { ttl: '1s', allowCapacityEviction: true };
