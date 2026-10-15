@@ -22,8 +22,12 @@ const safeErrorCodes = new Set([
   'workflow_wait_failed', 'workflow_wait_timeout', 'workflow_worker_failed',
 ]);
 export function safeWorkflowErrorCode(error: unknown, fallback: 'workflow_transport_unavailable' | 'workflow_step_failed'): string {
-  const code = error instanceof WorkflowError ? Object.getOwnPropertyDescriptor(error, 'code')?.value : undefined;
-  return typeof code === 'string' && safeErrorCodes.has(code) ? code : fallback;
+  try {
+    const code = error instanceof WorkflowError ? Object.getOwnPropertyDescriptor(error, 'code')?.value : undefined;
+    return typeof code === 'string' && safeErrorCodes.has(code) ? code : fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 export function validateJSON(value: unknown): JSONValue {

@@ -29,6 +29,11 @@ describe('definition', () => {
   });
 });
 describe('run-scoped operations', () => {
+  it.each(['getOwnPropertyDescriptor', 'getPrototypeOf'] as const)('fails closed when authored error reflection throws from %s', async trap => {
+    const hostile = new Proxy(new WorkflowError('workflow_operation_conflict'), { [trap]: () => { throw new Error('/srv/workspace/private.pem token=leaked'); } });
+    const ctx = createWorkflowContext({ runId: 'r', stepId: 's', attempt: 0, input: null, parents: {}, transport: async () => { throw hostile; }, sleep: async () => {}, log: async () => {} });
+    await expect(ctx.issues.get('i')).rejects.toEqual(new WorkflowError('workflow_transport_unavailable'));
+  });
   it('maps an upstream authored WorkflowError to a fixed transport code', async () => {
     const malicious = new WorkflowError('/Users/private token=leaked');
     const ctx = createWorkflowContext({ runId: 'r', stepId: 's', attempt: 0, input: null, parents: {}, transport: async () => { throw malicious; }, sleep: async () => {}, log: async () => {} });

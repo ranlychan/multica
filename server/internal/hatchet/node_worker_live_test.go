@@ -50,7 +50,7 @@ func TestPackagedNodeWorkerLive(t *testing.T) {
 		return jsonString(t, body, "token")
 	}
 	workerToken, serverToken := mint("node-worker"), mint("test-only-server")
-	data, _ := json.Marshal(map[string]any{"root": root, "tenant": tenant, "workerToken": workerToken, "serverToken": serverToken, "api": c.APIURL, "grpc": c.GRPCAddress, "certs": filepath.Join(c.StateDir, "certs")})
+	data, _ := json.Marshal(map[string]any{"root": root, "tenant": tenant, "workerToken": workerToken, "serverToken": serverToken, "api": c.APIURL, "grpc": c.GRPCAddress, "certs": filepath.Join(c.StateDir, "certs"), "authoredBoundaryOnly": os.Getenv("MULTICA_NODE_BOUNDARY_ONLY") == "1"})
 	script, err := filepath.Abs("../../../packages/workflow-runner/test/live-proof.mjs")
 	if err != nil {
 		t.Fatal(err)

@@ -31,21 +31,27 @@ const start=async(revisions,generation,tlsOverride={})=>{
 try {
  await assert.rejects(fetch('http://127.0.0.1:1/api/v1/tenants/'+config.tenant));
  const r1=await revision(1),r2=await revision(2);
+ if(!config.authoredBoundaryOnly){
  await assert.rejects(start([r1],'node-wrong-name',{server_name:'wrong.invalid'}),/workflow_worker_failed/);
  await assert.rejects(start([r1],'node-no-client-cert',{strategy:'tls',cert_file:undefined,key_file:undefined}),/workflow_worker_failed/);
  emit({event:'mtls-negative-cases',wrongIdentityRejected:true,missingClientCertificateRejected:true});
- const sensitiveSource=`import {defineWorkflow,WorkflowError} from '@multica/workflow-sdk'; export default defineWorkflow({steps:[{id:'sensitive',run:async ctx=>{await ctx.log('info','private /srv/workspace/private.pem ${privateJWT}',{runner_token:'opaque-secret'});if(ctx.input.fail)throw new WorkflowError('/Users/private token=leaked');return {path:'/srv/workspace/private.pem',raw:'${privateJWT}'};}}]});`;
+ }
+ const sensitiveSource=`import {defineWorkflow,WorkflowError} from '@multica/workflow-sdk'; export default defineWorkflow({steps:[{id:'sensitive',run:async ctx=>{await ctx.log('info','private /srv/workspace/private.pem ${privateJWT}',{runner_token:'opaque-secret'});if(ctx.input.fail==='descriptor')throw new Proxy(new WorkflowError('workflow_operation_conflict'),{getOwnPropertyDescriptor(){throw new Error('/srv/workspace/private.pem token=leaked');}});if(ctx.input.fail==='prototype')throw new Proxy(new WorkflowError('workflow_operation_conflict'),{getPrototypeOf(){throw new Error('/srv/workspace/private.pem token=leaked');}});if(ctx.input.fail)throw new WorkflowError('/Users/private token=leaked');return {path:'/srv/workspace/private.pem',raw:'${privateJWT}'};}}]});`;
  const checked=await validateSource(sensitiveSource);const sensitivePath=`${config.root}/sensitive.ts`;await writeFile(sensitivePath,sensitiveSource,{mode:0o600});
  const sensitive={...checked,workflow_id:r1.workflow_id,revision_id:'c78d9029-23da-4463-91ab-891742f94b13',version:3,source_path:sensitivePath,engine_workflow_name:`multica-${r1.workflow_id}-v3-${checked.hash.slice(0,12)}`};
  const sensitiveWorker=await start([sensitive],'node-redaction');
- for(const fail of [true,false]){
-  const submitted=await request(`/api/v1/stable/tenants/${config.tenant}/workflow-runs/trigger`,{workflowName:sensitive.engine_workflow_name,input:{multica_run_id:fail?'redaction-fail':'redaction-result',input:{fail}},return_only_id:true});assert.equal(submitted.status,200);
+ for(const fail of ['descriptor','prototype',true,false]){
+  const submitted=await request(`/api/v1/stable/tenants/${config.tenant}/workflow-runs/trigger`,{workflowName:sensitive.engine_workflow_name,input:{multica_run_id:`redaction-${fail}`,input:{fail}},return_only_id:true});assert.equal(submitted.status,200);
   const done=await until('authored redaction boundary',async()=>{const r=await request(`/api/v1/stable/workflow-runs/${submitted.data.run.metadata.id}`);if(r.status===404)return false;assert.equal(r.status,200);return ['FAILED','COMPLETED'].includes(r.data.run.status)?r.data:false;});
   if(fail){assert.equal(done.run.status,'FAILED');assert.deepEqual(JSON.parse(done.run.errorMessage),{message:'workflow_step_failed'});for(const task of done.tasks)assert.deepEqual(JSON.parse(task.errorMessage),{message:'workflow_step_failed'});}
   else {assert.equal(done.run.status,'COMPLETED');assert.deepEqual(done.run.output,{value:{path:'[redacted]',raw:'[redacted]'}});}
   const logs=await request(`/api/v1/stable/tasks/${done.tasks[0].metadata.id}/logs?limit=10`);assert.equal(logs.status,200);assert(logs.data.rows.length>0);for(const entry of logs.data.rows){const message=JSON.parse(entry.message);assert.equal(message.message,'private [redacted] [redacted]');assert.deepEqual(message.fields,{runner_token:'[redacted]'});}
  }
- sensitiveWorker.kill('SIGKILL');emit({event:'authored-boundaries',error:'workflow_step_failed',resultAndLogs:'redacted'});
+ emit({event:'authored-boundaries',hostileReflection:['descriptor','prototype'],error:'workflow_step_failed',resultAndLogs:'redacted'});
+ if(config.authoredBoundaryOnly){
+  const drained=new Promise((resolve,reject)=>{sensitiveWorker.on('message',m=>{if(m.type==='drained')resolve();if(m.type==='error')reject(Error(m.code));});});sensitiveWorker.send({mode:'drain'});await drained;emit({event:'authored-boundary-only',drained:true});
+ }else{
+ sensitiveWorker.kill('SIGKILL');
  const old=await start([r1],'node-old');
  const submit=async(rev,id,delay,retry=false)=>request(`/api/v1/stable/tenants/${config.tenant}/workflow-runs/trigger`,{workflowName:rev.engine_workflow_name,input:{multica_run_id:id,input:{delay,retry}},return_only_id:true});
  const runId='59586e83-c2f7-4499-adab-5ad8056d1211';
@@ -78,4 +84,5 @@ try {
  const retried=await until('engine retry identity',async()=>{const r=await request(`/api/v1/stable/workflow-runs/${retry.data.run.metadata.id}`);lastRetry=r;if(r.status===404)return false;assert.equal(r.status,200);if(r.data.run.status==='FAILED')throw Error('retry run failed '+JSON.stringify(r.data));return r.data.run.status==='COMPLETED'?r.data:false;}).catch(async error=>{emit({event:'retry-diagnostic',last:lastRetry});for(const task of lastRetry?.data.tasks??[])emit({event:'retry-durable-diagnostic',taskId:task.metadata.id,wait:(await request(`/api/v1/stable/tenants/${config.tenant}/durable-tasks/${task.metadata.id}`)).data});throw error;});assert.equal(retried.run.output.value.parent.attempt,1);
  emit({event:'completed',oldRunId:engineId,oldOutput:recovered.run.output,newOutput:freshDone.run.output,retryOutput:retried.run.output,idempotency:recovered.workflowConfig.idempotency,actions:recovered.tasks.map(t=>t.actionId),replayLogCount:logs.data.rows.length});
  const drained=new Promise((resolve,reject)=>{current.on('message',m=>{if(m.type==='drained')resolve();if(m.type==='error')reject(Error(m.code));});});current.send({mode:'drain'});await drained;emit({event:'drained'});
+ }
 } finally {for(const child of children)child.kill('SIGKILL');}

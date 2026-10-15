@@ -373,3 +373,89 @@ Round1 changed files: SDK index.ts/index.test.ts, runner worker.ts and test-only
 live-proof.mjs, and this report. The two reviewed Important leaks are covered by
 fresh SDK/real-engine evidence; intermittent live retry timing remains a reported
 verification concern for the controller's independent review.
+
+## Independent review fix round2
+
+Review of3d9e940ba accepted the two original Important fixes but found a new
+reflection escape: a Proxy around public WorkflowError can throw from
+getOwnPropertyDescriptor (or getPrototypeOf during instanceof), causing the
+sanitizer itself to throw authored text before the worker creates its fixed-code
+error. This round fixes only that newly introduced failure.
+
+Test-first RED from repository root:
+
+```text
+pnpm --filter @multica/workflow-sdk exec vitest run src/index.test.ts
+Test Files 1 failed (1); Tests 2 failed | 10 passed (12); exit1
+fails closed when authored error reflection throws from getOwnPropertyDescriptor
+fails closed when authored error reflection throws from getPrototypeOf
+  Expected WorkflowError workflow_transport_unavailable
+  Received Error /srv/workspace/private.pem token=leaked
+```
+
+A test-only authored-boundary-only mode was added to the existing Go live fixture
+and packaged Node harness, selected by MULTICA_NODE_BOUNDARY_ONLY=1. It reuses
+actual provisioning, tenant worker token, mTLS registration, private Node IPC and
+persisted engine reads; it skips the full unrelated durable/retry scenario and
+the prior negative TLS matrix. Authored revision3 now covers descriptor-trap and
+prototype-trap proxies first, followed by prior ordinary authored-error and safe
+result/log cases. Every failure requires parsed run/task error JSON exactly
+`{message:"workflow_step_failed"}`, with no stack. Each probe uses a distinct
+reserved run key.
+
+Actual packaged worker RED, from `server/` before the helper fix:
+
+```text
+MULTICA_NODE_WORKER_LIVE=1 MULTICA_NODE_BOUNDARY_ONLY=1 HATCHET_BIN_DIR=/tmp/multica-task5a-hatchet-bin GOPROXY=https://goproxy.cn,direct go test ./internal/hatchet -run '^TestPackagedNodeWorkerLive$' -count=1 -v
+--- FAIL: TestPackagedNodeWorkerLive (26.08s)
+  expected {message:"workflow_step_failed"}
+  actual {message:"/srv/workspace/private.pem token=leaked",stack:"Error: /srv/workspace/private.pem token=leaked ... Object.getOwnPropertyDescriptor ... safeWorkflowErrorCode ..."}
+FAIL ... 26.517s
+```
+
+Minimal production fix: wrap the existing allowlist inspection in try/catch;
+return its caller-supplied fixed fallback when reflection throws. No new
+abstraction or changes to the allowlist, scrubber, worker registration, actions,
+timeouts, retry behavior or dependency graph. The worker's existing outer fixed
+message/cleared-stack behavior now also handles Proxy inspection failures.
+
+Fresh focused GREEN from repository root:
+
+```text
+pnpm --filter @multica/workflow-sdk --filter @multica/workflow-runner test
+  SDK12 passed; runner9 passed (5 files /21 tests total), exit0
+pnpm --filter @multica/workflow-sdk --filter @multica/workflow-runner build
+  both tsc exit0
+pnpm --filter @multica/workflow-sdk --filter @multica/workflow-runner typecheck
+  both tsc --noEmit exit0
+git diff --check
+  no output, exit0
+```
+
+Self-review: the try/catch includes both instanceof and property-descriptor
+inspection; neither trap is invoked outside that guard. Any inspection failure
+returns the trusted boundary fallback. Tests use real SDK transport rejection and
+real authored worker callbacks, not mocks of error sanitization. Round1's
+intermittent retry timeout remains disclosed; no retry fix, root-suite rerun or
+full durable/retry rerun was attempted in round2. Final5b/8 integration should
+exercise retry behavior again. No sandbox/general-DLP claims were added.
+
+Actual packaged worker GREEN with the same boundary-only command:
+
+```text
+{"event":"authored-boundaries","hostileReflection":["descriptor","prototype"],"error":"workflow_step_failed","resultAndLogs":"redacted"}
+{"event":"network-after-execution","type":"network-proof","denied":2,"wire":0}
+{"event":"authored-boundary-only","drained":true}
+--- PASS: TestPackagedNodeWorkerLive (26.00s)
+PASS
+ok github.com/multica-ai/multica/server/internal/hatchet 27.081s
+```
+
+Both hostile Proxy cases now persisted only the fixed message with no stack in
+run/task failure records, and prior ordinary authored-error/result/log boundary
+checks remained green. The real worker used mTLS and actual immutable registration
+IDs (workflow a9590874-e1e1-4245-b173-010b7a87f90b/version
+708ea7b3-631c-41ba-b4fa-16983a6f5ceb); REST stayed denied through clean drain.
+Only the fixture's own disposable resources were removed. Round2 changes are the
+guarded SDK helper, its two hostile-reflection regressions, test-only live-mode
+selection/Proxy fixtures and this report.
