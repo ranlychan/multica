@@ -1074,10 +1074,11 @@ func (c *Client) Deregister(ctx context.Context, runtimeIDs []string, reasons ma
 
 // RegisterResponse holds the server's response to a daemon registration.
 type RegisterResponse struct {
-	Runtimes     []Runtime       `json:"runtimes"`
-	Repos        []RepoData      `json:"repos"`
-	ReposVersion string          `json:"repos_version"`
-	Settings     json.RawMessage `json:"settings,omitempty"`
+	WorkflowControlToken string          `json:"workflow_control_token,omitempty"`
+	Runtimes             []Runtime       `json:"runtimes"`
+	Repos                []RepoData      `json:"repos"`
+	ReposVersion         string          `json:"repos_version"`
+	Settings             json.RawMessage `json:"settings,omitempty"`
 }
 
 func (c *Client) Register(ctx context.Context, req map[string]any) (*RegisterResponse, error) {

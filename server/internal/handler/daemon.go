@@ -194,8 +194,13 @@ func (h *Handler) verifyDaemonWorkspaceAccess(r *http.Request, workspaceID strin
 // ---------------------------------------------------------------------------
 
 type DaemonRegisterRequest struct {
-	WorkspaceID string `json:"workspace_id"`
-	DaemonID    string `json:"daemon_id"`
+	WorkflowCapable          bool   `json:"workflow_capable"`
+	WorkflowCodeRiskAccepted bool   `json:"workflow_code_risk_accepted"`
+	WorkflowControlToken     string `json:"workflow_control_token,omitempty"`
+	RunnerVersion            string `json:"runner_version"`
+	NodeVersion              string `json:"node_version"`
+	WorkspaceID              string `json:"workspace_id"`
+	DaemonID                 string `json:"daemon_id"`
 	// LegacyDaemonIDs lists prior hostname-derived daemon_ids this machine
 	// may have registered under before switching to a persistent UUID. The
 	// handler merges any matching runtime rows into the new row so agents
@@ -421,7 +426,7 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "workspace_id is required")
 		return
 	}
-	if len(req.Runtimes) == 0 && len(req.FailedProfiles) == 0 {
+	if len(req.Runtimes) == 0 && len(req.FailedProfiles) == 0 && !req.WorkflowCapable {
 		writeError(w, http.StatusBadRequest, "at least one runtime or failed profile is required")
 		return
 	}
@@ -455,8 +460,19 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "workspace not found")
 		return
 	}
+	var workflowControlToken string
+	if h.WorkflowControl != nil && (req.WorkflowCapable || req.RunnerVersion != "") {
+		workflowControlToken, err = h.enrollWorkflowDaemon(r, req, ownerID)
+		if err != nil && len(req.Runtimes) == 0 && len(req.FailedProfiles) == 0 {
+			workflowDenied(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 
 	resp := make([]AgentRuntimeResponse, 0, len(req.Runtimes))
+	if workflowControlToken != "" {
+		workflowPrivate(w)
+	}
 	for _, runtime := range req.Runtimes {
 		provider := normalizeProvider(runtime.Type)
 		if provider == "" {
@@ -737,10 +753,11 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 	repoResp := workspaceReposResponse(req.WorkspaceID, ws.Repos, ws.Settings)
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"runtimes":      resp,
-		"repos":         repoResp.Repos,
-		"repos_version": repoResp.ReposVersion,
-		"settings":      repoResp.Settings,
+		"workflow_control_token": workflowControlToken,
+		"runtimes":               resp,
+		"repos":                  repoResp.Repos,
+		"repos_version":          repoResp.ReposVersion,
+		"settings":               repoResp.Settings,
 	})
 }
 

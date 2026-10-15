@@ -5,6 +5,8 @@ import { WorkflowError } from '@multica/workflow-sdk';
 
 const send = (message: ChildMessage) => process.send?.(message);
 let drain: (() => Promise<void>) | undefined;
+let activate: (() => Promise<void>) | undefined;
+let retire: (() => Promise<void>) | undefined;
 let stopping = false;
 async function stop() {
   if (stopping) return;
@@ -21,12 +23,16 @@ process.once('message', async (message: ParentMessage) => {
   try {
     if (Number(process.versions.node.split('.')[0]) < 22) throw new WorkflowError('workflow_node_unavailable');
     if (message.mode === 'validate' || message.mode === 'graph') {
-      send({ type: 'validated', result: await validateSource(message.source) });
+      send({ type: 'validated', result: await validateSource(message.source, { processGroup: false }) });
       process.disconnect?.();
     } else if (message.mode === 'worker') {
       const { startWorker } = await import('./worker.js');
-      drain = (await startWorker(message.descriptor, send)).drain;
-      process.on('message', (next: ParentMessage) => { if (next.mode === 'drain') void stop(); });
+      ({ drain, activate, retire } = await startWorker(message.descriptor, send));
+      process.on('message', (next: ParentMessage) => {
+        if (next.mode === 'drain') void stop();
+        if (next.mode === 'activate') void activate?.().catch(() => { send({type:'error',code:'workflow_worker_failed'}); process.exit(1); });
+        if (next.mode === 'retire') void retire?.().then(() => process.exit(0), () => { send({type:'error',code:'workflow_worker_failed'});process.exit(1); });
+      });
     } else throw new WorkflowError('workflow_invalid_descriptor');
   } catch (error) {
     send({ type: 'error', code: error instanceof WorkflowError ? error.code : 'workflow_worker_failed' });

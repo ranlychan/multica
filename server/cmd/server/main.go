@@ -724,6 +724,16 @@ func main() {
 		slog.Error("workflow runtime configuration failed")
 		os.Exit(1)
 	}
+	h.WorkflowControl = &handler.WorkflowControl{Ready: hatchetSupervisor.Ready, Tenants: hatchetTenants}
+	if hatchetTenants != nil {
+		controlClient, err := hatchet.NewClient(hatchetConfig.APIURL, nil)
+		if err != nil {
+			slog.Error("workflow control configuration failed")
+			os.Exit(1)
+		}
+		h.WorkflowControl.Verifier = controlClient
+	}
+	h.WorkflowSvc.Eligible = h.WorkflowRunnerEligible
 	var replicaQueries *db.Queries
 	if replicaPool != nil {
 		replicaQueries = db.New(replicaPool)

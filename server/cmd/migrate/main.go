@@ -149,6 +149,8 @@ var concurrentIndexCleanups = map[string]string{
 	"573_workflow_run_active_index":                             "idx_workflow_run_active",
 	"575_workflow_runner_token_hash_index":                      "idx_workflow_runner_token_hash",
 	"576_workflow_runner_token_workspace_index":                 "idx_workflow_runner_token_workspace_daemon",
+	"598_workflow_daemon_control_hash":                          "idx_workflow_daemon_control_hash",
+	"601_workflow_runner_generation_phase_index":                "idx_workflow_runner_generation_phase",
 	"580_agent_task_queue_workflow_run_index":                   "idx_agent_task_queue_workflow_run",
 	"582_workflow_revision_version_index":                       "idx_workflow_revision_version",
 	"583_workflow_trigger_token_hash_index":                     "idx_workflow_trigger_token_hash",
@@ -373,6 +375,7 @@ var concurrentIndexCleanups = map[string]string{
 // the retry, while a bare CREATE would stay wedged on "already exists"; both
 // cases need direction-specific cleanup before the rollback can retry safely.
 var concurrentDownIndexCleanups = map[string]string{
+	"600_workflow_runner_single_generation_retirement":      "idx_workflow_runner_token_workspace_daemon",
 	"144_drop_agent_task_queue_chat_pending_v1":             "idx_agent_task_queue_chat_pending",
 	"171_drop_legacy_label_namespace_index":                 "issue_label_workspace_name_lower_idx",
 	"256_drop_agent_task_queue_chat_pending_v2":             "idx_agent_task_queue_chat_pending_v2",

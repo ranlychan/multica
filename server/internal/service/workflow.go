@@ -387,16 +387,31 @@ func (s *WorkflowService) PublishRevision(ctx context.Context, ws, id pgtype.UUI
 // and confirm engine registration before acknowledging success.
 func (s *WorkflowService) AcknowledgeRevision(ctx context.Context, ws, id pgtype.UUID, hash string, valid bool) (WorkflowPublishResult, error) {
 	var result WorkflowPublishResult
-	r, e := s.Queries.GetWorkflowRevisionInWorkspace(ctx, db.GetWorkflowRevisionInWorkspaceParams{ID: id, WorkspaceID: ws})
-	if e != nil {
-		return result, workflowError("workflow_not_found")
-	}
 	tx, e := s.TxStarter.Begin(ctx)
 	if e != nil {
 		return result, e
 	}
 	defer tx.Rollback(ctx)
+	result, e = s.AcknowledgeRevisionTx(ctx, tx, ws, id, hash, valid)
+	if e != nil {
+		return result, e
+	}
+	if e = tx.Commit(ctx); e != nil {
+		return WorkflowPublishResult{}, e
+	}
+	return result, nil
+}
+
+// AcknowledgeRevisionTx keeps the original author/CAS gate in the caller's
+// transaction so daemon registration leases and activation commit together.
+// Callers acquiring workspace/daemon locks must do so before this definition lock.
+func (s *WorkflowService) AcknowledgeRevisionTx(ctx context.Context, tx pgx.Tx, ws, id pgtype.UUID, hash string, valid bool) (WorkflowPublishResult, error) {
+	var result WorkflowPublishResult
 	q := s.Queries.WithTx(tx)
+	r, e := q.GetWorkflowRevisionInWorkspace(ctx, db.GetWorkflowRevisionInWorkspaceParams{ID: id, WorkspaceID: ws})
+	if e != nil {
+		return result, workflowError("workflow_not_found")
+	}
 	w, e := q.LockWorkflowForUpdate(ctx, db.LockWorkflowForUpdateParams{ID: r.WorkflowID, WorkspaceID: ws})
 	if e != nil {
 		return result, e
@@ -445,9 +460,6 @@ func (s *WorkflowService) AcknowledgeRevision(ctx context.Context, ws, id pgtype
 		if e != nil {
 			return result, e
 		}
-	}
-	if e = tx.Commit(ctx); e != nil {
-		return result, e
 	}
 	return WorkflowPublishResult{Revision: r, RegistrationState: registration}, nil
 }

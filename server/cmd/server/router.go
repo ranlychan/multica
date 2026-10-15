@@ -1521,6 +1521,15 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	// context is derived from the trigger row, never from request headers.
 	r.Post("/api/webhooks/autopilots/{token}", h.HandleAutopilotWebhook)
 	r.Post("/api/workflow-triggers/{token}", h.HandleWorkflowIngress)
+	// Workflow credentials are dedicated capabilities, never ordinary daemon tokens.
+	r.Get("/api/daemon/workflows/revisions", h.WorkflowRunnerRevisions)
+	r.Post("/api/daemon/workflows/rotate", h.WorkflowRunnerRotate)
+	r.Post("/api/daemon/workflows/ack", h.WorkflowRunnerAcknowledge)
+	r.Post("/api/daemon/workflows/prepare", h.WorkflowRunnerPrepare)
+	r.Post("/api/daemon/workflows/retire", h.WorkflowRunnerRetire)
+	r.Post("/api/daemon/workflows/revoke", h.WorkflowRunnerRevoke)
+	r.Post("/api/daemon/workflows/validation-failed", h.WorkflowRunnerValidationFailed)
+	r.Post("/api/workflow-runs/{id}/actions", h.WorkflowRunnerAction)
 	// GitHub App webhook (no Multica auth — requests are authenticated via
 	// HMAC-SHA256 signature in the handler) and post-install setup callback.
 	r.Post("/api/webhooks/github", h.HandleGitHubWebhook)

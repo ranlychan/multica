@@ -384,6 +384,7 @@ type repoCacheBackend interface {
 
 // Daemon is the local agent runtime that polls for and executes tasks.
 type Daemon struct {
+	workflow   *workflowManager
 	cfg        Config
 	client     *Client
 	repoCache  repoCacheBackend
@@ -762,6 +763,7 @@ func New(cfg Config, logger *slog.Logger) *Daemon {
 	d.agentsAvailable.Store(&initialAgents)
 	d.executionEnvironmentCommand = defaultExecutionEnvironmentCommand
 	d.runner = taskRunnerFunc(d.runTask)
+	d.workflow = newWorkflowManager(cfg.Workflow, d.client)
 	d.runUpdateFn = d.runUpdate
 	return d
 }
@@ -2158,6 +2160,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	// Start workspace sync loop to discover newly created workspaces.
 	go d.workspaceSyncLoop(ctx)
+	if d.workflow != nil {
+		workflowDone := make(chan struct{})
+		go func() { defer close(workflowDone); d.workflowLoop(ctx) }()
+		defer func() { cancel(); <-workflowDone }()
+	}
 	go d.terminalReportReplayLoop(ctx)
 
 	// Discover agent CLIs installed after startup (MUL-5439). Separate from the
@@ -2962,7 +2969,8 @@ func (d *Daemon) registerRuntimesForWorkspaceBatchLocked(ctx context.Context, wo
 	// previously cached on the workspaceState.
 	profileSig := d.appendProfileRuntimes(ctx, workspaceID, &runtimes, &failedProfiles)
 
-	if len(runtimes) == 0 && len(failedProfiles) == 0 {
+	workflowFields := d.workflowRegistration(ctx, workspaceID)
+	if len(runtimes) == 0 && len(failedProfiles) == 0 && workflowFields["workflow_capable"] != true {
 		// profileSig is still meaningful even when nothing resolves: the
 		// refresh path uses it to remember "we already converged on the
 		// disabled-everywhere state" so duplicate change notifications are a
@@ -2981,16 +2989,22 @@ func (d *Daemon) registerRuntimesForWorkspaceBatchLocked(ctx context.Context, wo
 		"runtimes":          runtimes,
 		"failed_profiles":   failedProfiles,
 	}
+	for k, v := range workflowFields {
+		req[k] = v
+	}
 
 	resp, err := d.client.Register(ctx, req)
 	if err != nil {
 		return nil, "", fmt.Errorf("register runtimes: %w", err)
 	}
-	if len(resp.Runtimes) == 0 && len(failedProfiles) == 0 {
+	if len(resp.Runtimes) == 0 && len(failedProfiles) == 0 && resp.WorkflowControlToken == "" {
 		return nil, "", fmt.Errorf("register runtimes: empty response")
 	}
 	d.logger.Debug("register response", "workspace_id", workspaceID, "runtimes", len(resp.Runtimes), "repos", len(resp.Repos), "repos_version", resp.ReposVersion)
 	d.recordBuiltinVersionsSent(workspaceID, runtimes)
+	if d.workflow != nil {
+		d.workflow.enroll(workspaceID, resp.WorkflowControlToken)
+	}
 	return resp, profileSig, nil
 }
 
@@ -3013,7 +3027,8 @@ func (d *Daemon) registerRuntimesForWorkspaceBatchLocked(ctx context.Context, wo
 // for this call, the merge, and the cleanup that follows it.
 func (d *Daemon) registerBuiltinRuntimesForWorkspaceLocked(ctx context.Context, workspaceID string, builtins []map[string]string) (*RegisterResponse, error) {
 	runtimes := cloneRuntimeEntries(builtins)
-	if len(runtimes) == 0 {
+	workflowFields := d.workflowRegistration(ctx, workspaceID)
+	if len(runtimes) == 0 && workflowFields["workflow_capable"] != true {
 		return nil, ErrNoRuntimesToRegister
 	}
 	req := map[string]any{
@@ -3028,15 +3043,21 @@ func (d *Daemon) registerBuiltinRuntimesForWorkspaceLocked(ctx context.Context, 
 		// report profile failures either.
 		"failed_profiles": []map[string]string{},
 	}
+	for k, v := range workflowFields {
+		req[k] = v
+	}
 	resp, err := d.client.Register(ctx, req)
 	if err != nil {
 		return nil, fmt.Errorf("register builtin runtimes: %w", err)
 	}
-	if len(resp.Runtimes) == 0 {
+	if len(resp.Runtimes) == 0 && resp.WorkflowControlToken == "" {
 		return nil, fmt.Errorf("register builtin runtimes: empty response")
 	}
 	d.logger.Debug("builtin register response", "workspace_id", workspaceID, "runtimes", len(resp.Runtimes))
 	d.recordBuiltinVersionsSent(workspaceID, runtimes)
+	if d.workflow != nil {
+		d.workflow.enroll(workspaceID, resp.WorkflowControlToken)
+	}
 	return resp, nil
 }
 
@@ -4402,6 +4423,9 @@ func (d *Daemon) syncWorkspacesFromAPI(ctx context.Context, reconcileProfiles bo
 			}
 			delete(d.workspaces, id)
 			d.mu.Unlock()
+			if d.workflow != nil {
+				d.workflow.remove(id)
+			}
 			d.logger.Info("stopped watching workspace", "workspace_id", id)
 			removed++
 		}

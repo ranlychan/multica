@@ -117,6 +117,12 @@ func NewTenantService(client *Client, store TenantStore, box *secretbox.Box, ema
 	return &TenantService{client: &Client{origin: client.origin, http: &hc}, store: store, box: box, email: email, password: password}, nil
 }
 func (s *TenantService) login(ctx context.Context) error {
+	// The pin redirects an already-authenticated login instead of returning 200.
+	// All callers hold s.mu, and NewTenantService owns a private Client/http.Client
+	// copy: no request can read its jar concurrently with this replacement.
+	// Start each explicit credential login with a fresh jar; never follow an
+	// authentication redirect or reuse a possibly expired provisioning session.
+	s.client.http.Jar, _ = cookiejar.New(nil)
 	_, e := s.client.request(ctx, "POST", "/api/v1/users/login", "", map[string]string{"email": s.email, "password": s.password})
 	return e
 }

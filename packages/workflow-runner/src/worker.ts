@@ -110,12 +110,26 @@ export async function startWorker(descriptor: WorkerDescriptor, send: (message: 
     return workflow;
   });
   const worker = await client.worker(`multica-${descriptor.generation}`, { workflows, slots: 10, durableSlots: 10, handleKill: false });
-  const running = worker.start();
-  running.catch(() => send({ type: 'error', code: 'workflow_worker_failed' }));
-  await worker.waitUntilReady(10000);
   if (registrations.size !== descriptor.revisions.length) throw new WorkflowError('workflow_registration_mismatch');
+  let active = false;
+  const activate = async () => {
+    if (active) return;
+    active = true;
+    const running = worker.start();
+    running.catch(() => send({ type: 'error', code: 'workflow_worker_failed' }));
+    await worker.waitUntilReady(10000);
+    if (descriptor.activation_gate) send({ type: 'active', generation: descriptor.generation });
+  };
+  // Registration evidence is checked and the product action lease is granted
+  // before a gated daemon worker can consume any already-queued old revision.
+  if (!descriptor.activation_gate) await activate();
   send({ type: 'ready', protocol: 1, runner_version: RUNNER_VERSION, node_version: process.versions.node, workspace_id: descriptor.workspace_id, tenant_id: descriptor.tenant_id, generation: descriptor.generation, registrations: [...registrations.values()] });
-  return { drain: async () => {
+  return { activate, retire: async () => {
+    // Routine replacement waits for active work/acknowledged durable eviction.
+    // The Go owner separately bounds this by the original credential deadline.
+    await worker.stop();
+    send({ type: 'drained', generation: descriptor.generation });
+  }, drain: async () => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([worker.stop(), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new WorkflowError('workflow_drain_timeout')), descriptor.drain_timeout_ms ?? 10000); })]);

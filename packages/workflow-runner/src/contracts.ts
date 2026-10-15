@@ -25,6 +25,7 @@ export interface WorkerDescriptor {
   product: { origin: string; runner_token: string };
   revisions: RevisionDescriptor[];
   drain_timeout_ms?: number;
+  activation_gate?: boolean;
 }
 export interface RegistrationEvidence {
   workflow_id: string;
@@ -43,5 +44,6 @@ export type ChildMessage =
   | { type: 'validated'; result: ValidationResult }
   | { type: 'ready'; protocol: 1; runner_version: string; node_version: string; workspace_id: string; tenant_id: string; generation: string; registrations: RegistrationEvidence[] }
   | { type: 'drained'; generation: string }
+  | { type: 'active'; generation: string }
   | { type: 'error'; code: string };
-export type ParentMessage = { mode: 'validate' | 'graph'; source: string } | { mode: 'worker'; descriptor: WorkerDescriptor } | { mode: 'drain' };
+export type ParentMessage = { mode: 'validate' | 'graph'; source: string } | { mode: 'worker'; descriptor: WorkerDescriptor } | { mode: 'drain' | 'activate' | 'retire' };

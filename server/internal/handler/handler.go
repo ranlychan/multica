@@ -202,6 +202,7 @@ type RuntimeRecoveryNotifier interface {
 
 type Handler struct {
 	WorkflowSvc            *service.WorkflowService
+	WorkflowControl        *WorkflowControl
 	Queries                *db.Queries
 	ReadSelector           *dbreader.Selector
 	DB                     dbExecutor

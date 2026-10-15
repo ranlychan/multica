@@ -102,6 +102,7 @@ var DefaultGCArtifactPatterns = []string{"node_modules", ".next", ".turbo"}
 
 // Config holds all daemon configuration.
 type Config struct {
+	Workflow                       WorkflowRunnerConfig
 	ServerBaseURL                  string
 	DaemonID                       string
 	LegacyDaemonIDs                []string // historical daemon_ids this machine may have registered under; reported at register time so the server can merge old runtime rows
@@ -631,6 +632,7 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		Profile:                         profile,
 		Agents:                          agents,
 		WorkspacesRoot:                  workspacesRoot,
+		Workflow:                        workflowConfigFromEnv(workspacesRoot),
 		KeepEnvAfterTask:                keepEnv,
 		GCEnabled:                       gcEnabled,
 		GCInterval:                      gcInterval,

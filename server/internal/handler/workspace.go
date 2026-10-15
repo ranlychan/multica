@@ -1202,6 +1202,10 @@ func (h *Handler) DeleteWorkspace(w http.ResponseWriter, r *http.Request) {
 			run:  func() error { return qtx.DeleteWorkflowRunnerTokensByWorkspace(ctx, requester.WorkspaceID) },
 		},
 		{
+			name: "workflow_daemon",
+			run:  func() error { return qtx.DeleteWorkflowDaemonsByWorkspace(ctx, requester.WorkspaceID) },
+		},
+		{
 			name: "delete workflows",
 			run:  func() error { return qtx.DeleteWorkflowsByWorkspace(ctx, requester.WorkspaceID) },
 		},

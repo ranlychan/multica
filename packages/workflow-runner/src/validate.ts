@@ -10,21 +10,29 @@ export function graphDigest(graph: WorkflowGraph): string {
   validateGraph(graph);
   return sourceHash(JSON.stringify({ steps: graph.steps.map(s => ({ id: s.id, parents: [...s.parents].sort() })).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0) }));
 }
-export function validateSource(source: string, options: { timeoutMs?: number } = {}): Promise<ValidationResult> {
+export function validateSource(source: string, options: { timeoutMs?: number; processGroup?: boolean } = {}): Promise<ValidationResult> {
   if (typeof source !== 'string' || !source.length || Buffer.byteLength(source) > limits.sourceBytes) return Promise.reject(new WorkflowError('workflow_invalid_source'));
   const timeout = options.timeoutMs ?? 5000;
   if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 30000) return Promise.reject(new WorkflowError('workflow_invalid_duration'));
   return new Promise((resolve, reject) => {
     // Allowlist, not credential-name filtering. No HOME, NODE_OPTIONS, proxies,
     // cloud/engine/product credentials, or inherited configuration files.
-    const child = fork(fileURLToPath(new URL('../dist/child.js', import.meta.url)), [], { env: { LANG: 'C.UTF-8' }, execArgv: [], silent: true, detached: process.platform !== 'win32' });
+    // The packaged CLI's Go owner already owns its process group. A detached
+    // validator would escape that owner if it cancels before our timer fires.
+    const detached = options.processGroup !== false && process.platform !== 'win32';
+    const child = fork(fileURLToPath(new URL('../dist/child.js', import.meta.url)), [], { env: { LANG: 'C.UTF-8' }, execArgv: [], silent: true, detached });
+    const kill = () => {
+      if (child.pid) {
+        try { if (detached) process.kill(-child.pid, 'SIGKILL'); else child.kill('SIGKILL'); } catch { /* Already exited. */ }
+      }
+    };
+    process.once('exit', kill);
     let settled = false, bytes = 0;
     const finish = (result?: ValidationResult, code?: string) => {
       if (settled) return;
       settled = true; clearTimeout(timer);
-      if (child.pid) {
-        try { if (process.platform !== 'win32') process.kill(-child.pid, 'SIGKILL'); else child.kill('SIGKILL'); } catch { /* Already exited. */ }
-      }
+      process.removeListener('exit', kill);
+      kill();
       if (result) resolve(result); else reject(new WorkflowError(code ?? 'workflow_invalid_source'));
     };
     const timer = setTimeout(() => finish(undefined, 'workflow_validation_timeout'), timeout);
