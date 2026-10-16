@@ -9,6 +9,11 @@ SELECT * FROM workflow WHERE id=$1 AND workspace_id=$2;
 SELECT * FROM member WHERE workspace_id=$1 AND user_id=$2 FOR SHARE;
 -- name: LockWorkflowActionRun :one
 SELECT * FROM workflow_run WHERE id=$1 AND workspace_id=$2 FOR UPDATE;
+-- name: LockWorkflowActionRuntimeConsent :one
+-- After workspace/local authority, but before any agent/squad/Autopilot lock:
+-- runtime teardown owns runtime then agent then Autopilot. FOR SHARE also
+-- conflicts with the independent owner/visibility UPDATE until business commit.
+SELECT * FROM agent_runtime WHERE id=$1 AND workspace_id=$2 FOR SHARE;
 -- name: LockWorkflowActionCollaborators :many
 SELECT * FROM workflow_collaborator WHERE workflow_id=$1 AND workspace_id=$2 ORDER BY user_id FOR SHARE;
 -- name: LockWorkflowAgentInvocationTargets :many

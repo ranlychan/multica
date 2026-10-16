@@ -502,7 +502,7 @@ type workflowBoundary struct {
 func newWorkflowBoundary(t *testing.T) *workflowBoundary {
 	return newWorkflowBoundaryInWorkspace(t, testWorkspaceID)
 }
-func newWorkflowBoundaryInWorkspace(t *testing.T, workspaceID string) *workflowBoundary {
+func newWorkflowBoundaryInWorkspace(t *testing.T, workspaceID string, steps ...string) *workflowBoundary {
 	t.Helper()
 	b := &workflowBoundary{h: *testHandler, workspaceID: workspaceID}
 	b.h.WorkflowSvc = service.NewWorkflowService(b.h.Queries, testPool)
@@ -531,14 +531,26 @@ func newWorkflowBoundaryInWorkspace(t *testing.T, workspaceID string) *workflowB
 	dbfx.Cleanup(t, "DELETE FROM workflow WHERE id=$1", w.ID)
 	dbfx.Cleanup(t, "DELETE FROM workflow_revision WHERE workflow_id=$1", w.ID)
 	dbfx.Cleanup(t, "DELETE FROM workflow_run WHERE workflow_id=$1", w.ID)
-	pub, err := b.h.WorkflowSvc.PublishRevision(context.Background(), parseUUID(workspaceID), w.ID, actor, 0, "test-only-source", json.RawMessage(`{"steps":[{"id":"a","parents":[]}]}`))
+	if len(steps) == 0 {
+		steps = []string{"a"}
+	}
+	graph := wr.Graph{}
+	for _, step := range steps {
+		graph.Steps = append(graph.Steps, wr.Step{ID: step, Parents: []string{}})
+	}
+	graphJSON, _ := json.Marshal(graph)
+	pub, err := b.h.WorkflowSvc.PublishRevision(context.Background(), parseUUID(workspaceID), w.ID, actor, 0, "test-only-source", graphJSON)
 	if err != nil {
 		t.Fatal(err)
 	}
 	b.revisionID = pub.Revision.ID
 	testutil.Call(t, b.h.WorkflowRunnerRotate, b.request("POST", "rotate", nil)).Want(200).JSON(&b.cred)
-	action := service.WorkflowActionName(pub.Revision, "a")
-	b.ready = wr.Message{Type: "ready", Protocol: 1, WorkspaceID: workspaceID, TenantID: tenant, Generation: b.cred.Generation, RunnerVersion: "0.1.0", NodeVersion: "22.23.3", Registrations: []wr.Registration{{Revision: wireRevision(pub.Revision), EngineWorkflowID: "20000000-0000-0000-0000-000000000002", EngineVersionID: "30000000-0000-0000-0000-000000000003", Actions: []wr.Action{{StepID: "a", TaskName: action, ActionID: pub.Revision.HatchetName + ":" + action}}}}}
+	var actions []wr.Action
+	for _, step := range steps {
+		action := service.WorkflowActionName(pub.Revision, step)
+		actions = append(actions, wr.Action{StepID: step, TaskName: action, ActionID: pub.Revision.HatchetName + ":" + action})
+	}
+	b.ready = wr.Message{Type: "ready", Protocol: 1, WorkspaceID: workspaceID, TenantID: tenant, Generation: b.cred.Generation, RunnerVersion: "0.1.0", NodeVersion: "22.23.3", Registrations: []wr.Registration{{Revision: wireRevision(pub.Revision), EngineWorkflowID: "20000000-0000-0000-0000-000000000002", EngineVersionID: "30000000-0000-0000-0000-000000000003", Actions: actions}}}
 	return b
 }
 func (b *workflowBoundary) request(method, path string, body any) *http.Request {

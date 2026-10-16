@@ -127,6 +127,19 @@ func (h *Handler) WorkflowBusinessAction(ctx context.Context, a WorkflowActionAu
 		}
 		return nil, businessError("workflow_unavailable")
 	}
+	if mutation && !cachedHint && agentID.Valid {
+		// Workspace/local authority is already locked. Runtime consent must be
+		// locked before agent/Autopilot rows, matching teardown's dependency
+		// order without reversing workspace deletion/legacy-runtime merge order.
+		// Readiness below reuses the existing agent-owner/runtime-owner policy
+		// under this retained row lock; cached results never readmit liveness.
+		if !prepared.RuntimeID.Valid {
+			return nil, businessError("workflow_unavailable")
+		}
+		if _, e := q.LockWorkflowActionRuntimeConsent(ctx, db.LockWorkflowActionRuntimeConsentParams{ID: prepared.RuntimeID, WorkspaceID: a.Run.WorkspaceID}); e != nil {
+			return nil, businessError("workflow_unavailable")
+		}
+	}
 	if req.Operation == "issues.create" && p.AssigneeType == "member" {
 		if _, e := q.LockWorkflowActionMembership(ctx, db.LockWorkflowActionMembershipParams{WorkspaceID: a.Run.WorkspaceID, UserID: mustBusinessUUID(p.AssigneeID)}); e != nil {
 			return nil, businessError("workflow_forbidden")
@@ -510,7 +523,7 @@ func (h *Handler) performWorkflowBusiness(ctx context.Context, tx pgx.Tx, q *db.
 		if len(payload) == 0 {
 			payload = json.RawMessage(`{}`)
 		}
-		run, after, err := h.AutopilotService.DispatchWorkflowInTx(ctx, tx, ap, a.Principal, a.Run.ID, req.OperationKey, payload, prepared)
+		run, after, err := h.AutopilotService.DispatchWorkflowInTx(ctx, tx, ap, a.Principal, a.Run.ID, req.StepID, req.OperationKey, payload, prepared)
 		return encode(workflowAutopilotResult(run), after, err)
 	}
 	return nil, nil, businessError("workflow_invalid_payload")

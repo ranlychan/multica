@@ -35,8 +35,11 @@ type workflowBusinessFixture struct {
 }
 
 func newWorkflowBusinessFixture(t *testing.T, principals ...string) *workflowBusinessFixture {
+	return newWorkflowBusinessFixtureWithSteps(t, []string{"a"}, principals...)
+}
+func newWorkflowBusinessFixtureWithSteps(t *testing.T, steps []string, principals ...string) *workflowBusinessFixture {
 	t.Helper()
-	b := newWorkflowBoundary(t)
+	b := newWorkflowBoundaryInWorkspace(t, testWorkspaceID, steps...)
 	testutil.Call(t, b.h.WorkflowRunnerAcknowledge, b.request("POST", "ack", b.ready)).Want(200)
 	w, err := b.h.WorkflowSvc.Load(context.Background(), parseUUID(b.workspaceID), b.workflowID)
 	if err != nil {
@@ -64,9 +67,12 @@ func newWorkflowBusinessFixture(t *testing.T, principals ...string) *workflowBus
 }
 
 func (f *workflowBusinessFixture) action(operation, key string, payload any) *http.Request {
+	return f.actionInStep("a", operation, key, payload)
+}
+func (f *workflowBusinessFixture) actionInStep(step, operation, key string, payload any) *http.Request {
 	raw, _ := json.Marshal(payload)
 	path := "/api/workflow-runs/" + f.runID + "/actions"
-	body, _ := json.Marshal(WorkflowActionRequest{Protocol: 1, RunID: f.runID, StepID: "a", Operation: operation, OperationKey: key, Payload: raw, EngineRunID: f.engineID, EngineTaskID: f.taskID, InvocationCount: 1})
+	body, _ := json.Marshal(WorkflowActionRequest{Protocol: 1, RunID: f.runID, StepID: step, Operation: operation, OperationKey: key, Payload: raw, EngineRunID: f.engineID, EngineTaskID: f.taskID, InvocationCount: 1})
 	r := withURLParam(newRequest("POST", path, nil), "id", f.runID)
 	r.Body = io.NopCloser(strings.NewReader(string(body)))
 	r.Header.Set("Authorization", "Bearer "+f.cred.RunnerToken)

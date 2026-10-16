@@ -2431,6 +2431,43 @@ func (q *Queries) LockWorkflowActionRun(ctx context.Context, arg LockWorkflowAct
 	return i, err
 }
 
+const lockWorkflowActionRuntimeConsent = `-- name: LockWorkflowActionRuntimeConsent :one
+SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name FROM agent_runtime WHERE id=$1 AND workspace_id=$2 FOR SHARE
+`
+
+type LockWorkflowActionRuntimeConsentParams struct {
+	ID          pgtype.UUID `json:"id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+// After workspace/local authority, but before any agent/squad/Autopilot lock:
+// runtime teardown owns runtime then agent then Autopilot. FOR SHARE also
+// conflicts with the independent owner/visibility UPDATE until business commit.
+func (q *Queries) LockWorkflowActionRuntimeConsent(ctx context.Context, arg LockWorkflowActionRuntimeConsentParams) (AgentRuntime, error) {
+	row := q.db.QueryRow(ctx, lockWorkflowActionRuntimeConsent, arg.ID, arg.WorkspaceID)
+	var i AgentRuntime
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.DaemonID,
+		&i.Name,
+		&i.RuntimeMode,
+		&i.Provider,
+		&i.Status,
+		&i.DeviceInfo,
+		&i.Metadata,
+		&i.LastSeenAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.OwnerID,
+		&i.LegacyDaemonID,
+		&i.Visibility,
+		&i.ProfileID,
+		&i.CustomName,
+	)
+	return i, err
+}
+
 const lockWorkflowAgentInvocationTargets = `-- name: LockWorkflowAgentInvocationTargets :many
 SELECT id, agent_id, target_type, target_id, created_by, created_at FROM agent_invocation_target WHERE agent_id=$1 ORDER BY id FOR SHARE
 `

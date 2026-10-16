@@ -2,6 +2,9 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -37,7 +40,7 @@ func (s *AutopilotService) WorkflowAgent(ctx context.Context, ap db.Autopilot) (
 // DispatchWorkflowInTx uses the existing admission, quota and downstream
 // producers, with full business ownership in the caller's receipt transaction.
 // Current writer/invocation grants must already be locked by that caller.
-func (s *AutopilotService) DispatchWorkflowInTx(ctx context.Context, tx pgx.Tx, ap db.Autopilot, principal, workflowRun pgtype.UUID, key string, payload []byte, prepared WorkflowTaskEnqueue) (db.AutopilotRun, func(), error) {
+func (s *AutopilotService) DispatchWorkflowInTx(ctx context.Context, tx pgx.Tx, ap db.Autopilot, principal, workflowRun pgtype.UUID, stepID, key string, payload []byte, prepared WorkflowTaskEnqueue) (db.AutopilotRun, func(), error) {
 	scoped := *s
 	scoped.Queries = s.Queries.WithTx(tx)
 	state := &workflowAutopilotDispatch{tx: tx, prepared: prepared, service: s}
@@ -48,9 +51,20 @@ func (s *AutopilotService) DispatchWorkflowInTx(ctx context.Context, tx pgx.Tx, 
 	if ap.ExecutionMode == "run_only" {
 		status = "running"
 	}
-	run, _, err := scoped.createAutopilotRunWithQuota(ctx, ap.WorkspaceID, "manual", "workflow:"+key, db.CreateAutopilotRunParams{ID: dbid.NewV7(), AutopilotID: ap.ID, Source: "manual", Status: status, TriggerPayload: payload, SquadID: autopilotSquadAttribution(ap), WorkflowRunID: workflowRun, PrincipalUserID: principal}, tx)
+	// The caller key is arbitrary signed author input, not a globally trusted
+	// SDK hash. Scope quota admission to the verified local receipt identity.
+	identity, _ := json.Marshal([]string{util.UUIDToString(workflowRun), stepID, key})
+	digest := sha256.Sum256(identity)
+	quotaKey := "workflow:" + hex.EncodeToString(digest[:])
+	run, reused, err := scoped.createAutopilotRunWithQuota(ctx, ap.WorkspaceID, "manual", quotaKey, db.CreateAutopilotRunParams{ID: dbid.NewV7(), AutopilotID: ap.ID, Source: "manual", Status: status, TriggerPayload: payload, SquadID: autopilotSquadAttribution(ap), WorkflowRunID: workflowRun, PrincipalUserID: principal}, tx)
 	if err != nil {
 		return run, nil, err
+	}
+	if reused {
+		// Ordinary replay was already answered by the locked completed receipt.
+		// Missing/inconsistent receipt ownership cannot authorize redispatching
+		// or replacing downstream links on an existing quota run.
+		return run, nil, workflowError("workflow_operation_conflict")
 	}
 	state.prepared.AutopilotRunID = run.ID
 	switch ap.ExecutionMode {
