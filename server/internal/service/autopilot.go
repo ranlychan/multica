@@ -678,18 +678,23 @@ func dispatchFailReasonCode(err error) dispatch.ReasonCode {
 // Creator on the issue is always the agent that will actually do the work
 // (the resolved leader for a squad autopilot, otherwise the assignee agent
 // itself), so activity / mentions render with the right author identity.
-func (s *AutopilotService) dispatchCreateIssue(ctx context.Context, ap db.Autopilot, run *db.AutopilotRun, triggerTimezone string, actorUserID pgtype.UUID) error {
+func (s *AutopilotService) dispatchCreateIssue(ctx context.Context, ap db.Autopilot, run *db.AutopilotRun, triggerTimezone string, actorUserID pgtype.UUID, workflow ...*workflowAutopilotDispatch) error {
 	leader, _, err := s.resolveAutopilotLeader(ctx, ap)
 	if err != nil {
 		return fmt.Errorf("resolve leader: %w", err)
 	}
 	issueCountPolicy := ResolveIssueCountPolicy(ctx, s.Entitlements, ap.WorkspaceID)
 
-	tx, err := s.TxStarter.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+	var tx pgx.Tx
+	if len(workflow) > 0 {
+		tx = workflow[0].tx
+	} else {
+		tx, err = s.TxStarter.Begin(ctx)
+		if err != nil {
+			return fmt.Errorf("begin tx: %w", err)
+		}
+		defer tx.Rollback(ctx)
 	}
-	defer tx.Rollback(ctx)
 
 	qtx := s.Queries.WithTx(tx)
 
@@ -794,6 +799,24 @@ func (s *AutopilotService) dispatchCreateIssue(ctx context.Context, ap db.Autopi
 	*run = updatedRun
 	if _, err := settleAutopilotQuota(ctx, qtx, run.QuotaReservationID, true); err != nil {
 		return fmt.Errorf("consume quota reservation: %w", err)
+	}
+	if len(workflow) > 0 {
+		var squad pgtype.UUID
+		if ap.AssigneeType == "squad" {
+			squad = ap.AssigneeID
+		}
+		task, err := s.TaskSvc.EnqueueWorkflowIssueTaskInTx(ctx, qtx, issue, leader.ID, squad, workflow[0].prepared)
+		if err != nil {
+			return err
+		}
+		workflow[0].tasks = append(workflow[0].tasks, task)
+		effects := workflow[0].service
+		workflow[0].after = append(workflow[0].after, func() {
+			effects.Bus.Publish(events.Event{Type: protocol.EventIssueCreated, WorkspaceID: util.UUIDToString(ap.WorkspaceID), ActorType: "agent", ActorID: util.UUIDToString(leader.ID), Payload: map[string]any{"issue": IssueToMapResolved(ctx, effects.Queries, issue, effects.getIssuePrefix(ap.WorkspaceID))}})
+			effects.captureIssueCreatedFromAutopilot(ap, run, issue, leader.ID)
+			effects.notifyAutopilotSubscribersOnCreate(ctx, ap, issue, leader.ID, templateSubs)
+		})
+		return nil
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -978,7 +1001,7 @@ func (e *errDispatchSkipped) Error() string { return e.reason }
 // applies also run here as belt-and-braces: if the leader changed between
 // admission and dispatch, or the runtime went offline in the gap, we still
 // fail closed instead of enqueueing a doomed task.
-func (s *AutopilotService) dispatchRunOnly(ctx context.Context, ap db.Autopilot, run *db.AutopilotRun, actorUserID pgtype.UUID) error {
+func (s *AutopilotService) dispatchRunOnly(ctx context.Context, ap db.Autopilot, run *db.AutopilotRun, actorUserID pgtype.UUID, workflow ...*workflowAutopilotDispatch) error {
 	agent, _, err := s.resolveAutopilotLeader(ctx, ap)
 	if err != nil {
 		// Same admission-vs-failure classification as shouldSkipDispatch:
@@ -1031,7 +1054,13 @@ func (s *AutopilotService) dispatchRunOnly(ctx context.Context, ap db.Autopilot,
 		return &errDispatchSkipped{reason: formatAdmissionReason(ap, "workspace fail-closed: no accountable human for autopilot run"), code: dispatch.ReasonAttributionBlocked}
 	}
 	apSource, _, apEvidenceKind, apEvidenceRef := attributionCreateParams(autopilotAttr)
+	var workflowRunID pgtype.UUID
+	if len(workflow) > 0 {
+		workflowRunID = workflow[0].prepared.RunID
+		apSource = pgtype.Text{String: "workflow", Valid: true}
+	}
 	task, err := s.Queries.CreateAutopilotTask(ctx, db.CreateAutopilotTaskParams{
+		WorkflowRunID:  workflowRunID,
 		ID:             dbid.NewV7(),
 		AgentID:        agent.ID,
 		RuntimeID:      agent.RuntimeID,
@@ -1061,9 +1090,16 @@ func (s *AutopilotService) dispatchRunOnly(ctx context.Context, ap db.Autopilot,
 		TaskID: task.ID,
 	})
 	if err != nil {
+		if len(workflow) > 0 {
+			return fmt.Errorf("link autopilot task: %w", err)
+		}
 		slog.Warn("failed to update run with task_id", "run_id", util.UUIDToString(run.ID), "error", err)
 	} else {
 		*run = updatedRun
+	}
+	if len(workflow) > 0 {
+		workflow[0].tasks = append(workflow[0].tasks, task)
+		return nil
 	}
 
 	// Drop the empty-claim cache and wake the daemon. dispatchRunOnly

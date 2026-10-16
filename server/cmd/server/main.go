@@ -744,6 +744,7 @@ func main() {
 	}
 	h.WorkflowSvc.Ready = workflowReady
 	h.WorkflowControl = &handler.WorkflowControl{Ready: workflowReady, Tenants: hatchetTenants}
+	h.WorkflowControl.Action = h.WorkflowBusinessAction
 	if workflowAssignments != nil {
 		h.WorkflowControl.Assignments = workflowAssignments
 	}

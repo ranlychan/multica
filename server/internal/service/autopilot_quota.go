@@ -113,21 +113,39 @@ func (s *AutopilotService) createAutopilotRunWithQuota(
 	workspaceID pgtype.UUID,
 	source, idempotencyKey string,
 	params db.CreateAutopilotRunParams,
+	admissionTx ...pgx.Tx,
 ) (db.AutopilotRun, bool, error) {
 	if !validAutopilotExecutionSource(source) {
 		return db.AutopilotRun{}, false, fmt.Errorf("invalid autopilot execution source %q", source)
 	}
 	policy, enabled := s.quotaPolicy(ctx, workspaceID)
+	queries := s.Queries
+	if len(admissionTx) > 0 {
+		queries = queries.WithTx(admissionTx[0])
+	}
 	if !enabled {
-		run, err := s.Queries.CreateAutopilotRun(ctx, params)
+		run, err := queries.CreateAutopilotRun(ctx, params)
 		return run, false, err
 	}
 
-	tx, err := s.TxStarter.Begin(ctx)
-	if err != nil {
-		return db.AutopilotRun{}, false, fmt.Errorf("begin quota admission: %w", err)
+	var tx pgx.Tx
+	var err error
+	owned := len(admissionTx) == 0
+	if owned {
+		tx, err = s.TxStarter.Begin(ctx)
+		if err != nil {
+			return db.AutopilotRun{}, false, fmt.Errorf("begin quota admission: %w", err)
+		}
+		defer tx.Rollback(ctx)
+	} else {
+		tx = admissionTx[0]
 	}
-	defer tx.Rollback(ctx)
+	commit := func() error {
+		if owned {
+			return tx.Commit(ctx)
+		}
+		return nil
+	}
 	qtx := s.Queries.WithTx(tx)
 	periodArgs := db.EnsureAutopilotQuotaPeriodParams{
 		WorkspaceID: workspaceID,
@@ -159,7 +177,7 @@ func (s *AutopilotService) createAutopilotRunWithQuota(
 		} else if runErr != nil {
 			return db.AutopilotRun{}, false, fmt.Errorf("load idempotent quota run: %w", runErr)
 		} else {
-			if err := tx.Commit(ctx); err != nil {
+			if err := commit(); err != nil {
 				return db.AutopilotRun{}, false, fmt.Errorf("commit idempotent quota admission: %w", err)
 			}
 			s.recordAutopilotQuotaDecision(policy.action, source, "reused")
@@ -179,13 +197,15 @@ func (s *AutopilotService) createAutopilotRunWithQuota(
 		if err != nil {
 			return db.AutopilotRun{}, false, fmt.Errorf("record blocked quota admission: %w", err)
 		}
-		if err := tx.Commit(ctx); err != nil {
+		if err := commit(); err != nil {
 			return db.AutopilotRun{}, false, fmt.Errorf("commit blocked quota admission: %w", err)
 		}
 		// Inbox delivery is presentation-only. It runs after the admission
 		// transaction commits so a malformed notification marker or failed insert
 		// can never turn the quota response into a 500 or roll back blocked counts.
-		s.deliverAutopilotQuotaRejectionNotice(ctx, policy, workspaceID, source, params)
+		if owned {
+			s.deliverAutopilotQuotaRejectionNotice(ctx, policy, workspaceID, source, params)
+		}
 		s.recordAutopilotQuotaDecision(policy.action, source, "blocked")
 		return db.AutopilotRun{}, false, &AutopilotQuotaExceededError{
 			Used: period.UsedCount, Reserved: period.ReservedCount,
@@ -212,7 +232,7 @@ func (s *AutopilotService) createAutopilotRunWithQuota(
 	if err != nil {
 		return db.AutopilotRun{}, false, fmt.Errorf("create quota-linked run: %w", err)
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := commit(); err != nil {
 		return db.AutopilotRun{}, false, fmt.Errorf("commit quota admission: %w", err)
 	}
 	result := "admitted"
@@ -284,6 +304,7 @@ func autopilotRunFromTerminalRow(row db.UpdateAutopilotRunTerminalWithQuotaRow) 
 		Result: row.Result, CreatedAt: row.CreatedAt, SquadID: row.SquadID,
 		PlannedAt: row.PlannedAt, WebhookDeliveryID: row.WebhookDeliveryID,
 		QuotaReservationID: row.QuotaReservationID, ReasonCode: row.ReasonCode,
+		WorkflowRunID: row.WorkflowRunID, PrincipalUserID: row.PrincipalUserID,
 	}
 }
 

@@ -200,6 +200,7 @@ type IssueCreateResult struct {
 	// AssignedTaskID is populated when Create enqueues the automatic task for
 	// an agent assignee, including a task deferred by AssignedAgentRunFireAt.
 	AssignedTaskID pgtype.UUID
+	assignedTask   db.AgentTaskQueue
 	// Labels is the authoritative set of labels attached to the new issue in
 	// the create transaction (empty when none were requested). Callers echo it
 	// on the create response + issue:created event so every client renders the
@@ -239,6 +240,23 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 		return IssueCreateResult{}, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	result, err := s.createInTx(ctx, tx, p, opts, issueCountPolicy)
+	if err != nil {
+		return result, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return IssueCreateResult{}, fmt.Errorf("commit: %w", err)
+	}
+	return s.finalizeCreate(ctx, result, p, opts), nil
+}
+
+// CreateInTx shares the create pipeline with callers that own an atomic
+// business transaction. The caller must finalize only after its commit.
+func (s *IssueService) CreateInTx(ctx context.Context, tx pgx.Tx, p IssueCreateParams, opts IssueCreateOpts) (IssueCreateResult, error) {
+	return s.createInTx(ctx, tx, p, opts, ResolveIssueCountPolicy(ctx, s.Entitlements, p.WorkspaceID))
+}
+
+func (s *IssueService) createInTx(ctx context.Context, tx pgx.Tx, p IssueCreateParams, opts IssueCreateOpts, issueCountPolicy IssueCountPolicy) (IssueCreateResult, error) {
 	qtx := s.Queries.WithTx(tx)
 
 	properties, err := validateIssueCreateProperties(ctx, tx, qtx, p.WorkspaceID, p.Properties)
@@ -499,9 +517,22 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 		}
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return IssueCreateResult{}, fmt.Errorf("commit: %w", err)
+	return IssueCreateResult{Issue: issue, Labels: labels, AssignedTaskID: assignedTask.ID, assignedTask: assignedTask}, nil
+}
+
+// FinalizeCreateInTx publishes an already committed create. Assignment is
+// caller-owned here and must have been persisted in the same transaction.
+func (s *IssueService) FinalizeCreateInTx(ctx context.Context, result IssueCreateResult, p IssueCreateParams, opts IssueCreateOpts) {
+	actorID := opts.ActorID
+	if actorID == "" {
+		actorID = util.UUIDToString(p.CreatorID)
 	}
+	s.publishIssueCreated(result.Issue, result.Attachments, result.Labels, p.CreatorType, actorID, opts)
+	s.captureCreatedAnalytics(result.Issue, p.CreatorType, actorID, opts)
+}
+
+func (s *IssueService) finalizeCreate(ctx context.Context, result IssueCreateResult, p IssueCreateParams, opts IssueCreateOpts) IssueCreateResult {
+	issue, labels := result.Issue, result.Labels
 
 	attachments := s.linkAttachments(ctx, issue, p.AttachmentIDs)
 
@@ -512,10 +543,11 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 
 	var assignedTaskID pgtype.UUID
 	if !opts.AssignedAgentRunFireAt.IsZero() {
-		assignedTaskID = assignedTask.ID
+		assignedTaskID = result.AssignedTaskID
 		if assignedTaskID.Valid {
 			// The deferred task became durable with the issue at commit. Refresh the
 			// daemon's schedule only now so a wakeup can never race uncommitted data.
+			assignedTask := result.assignedTask
 			s.TaskService.notifyRuntimeMayHaveWork(assignedTask.RuntimeID, "")
 			if err := s.TaskService.hydrateDeferredChannelIssueTaskOverlay(ctx, assignedTask); err != nil {
 				// Runtime overlays are best-effort on every enqueue path. The task is
@@ -540,7 +572,7 @@ func (s *IssueService) Create(ctx context.Context, p IssueCreateParams, opts Iss
 		assignedTaskID = s.maybeEnqueueOnAssign(ctx, issue, p.CreatorType, actorID, opts.AssignedAgentRunFireAt)
 	}
 
-	return IssueCreateResult{Issue: issue, Attachments: attachments, Labels: labels, AssignedTaskID: assignedTaskID}, nil
+	return IssueCreateResult{Issue: issue, Attachments: attachments, Labels: labels, AssignedTaskID: assignedTaskID}
 }
 
 // validateIssueCreateProperties returns the canonical JSONB bag to put on the
@@ -818,6 +850,8 @@ func classifyOrigin(issue db.Issue, opts IssueCreateOpts) (source, taskID, autop
 		return analytics.SourceManual, originID, ""
 	case "autopilot":
 		return analytics.SourceAutopilot, "", originID
+	case "workflow":
+		return "workflow", "", ""
 	default:
 		slog.Warn("analytics: unknown issue origin type",
 			"origin_type", issue.OriginType.String,

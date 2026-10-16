@@ -205,6 +205,9 @@ func workflowGoPackagedControlLive(t *testing.T, longHot bool) {
 	}
 	dbfx.Cleanup(t, "DELETE FROM workflow_hatchet_tenant WHERE workspace_id=$1", testWorkspaceID)
 	h := handler.Handler{Queries: queries, TxStarter: testPool, Bus: events.New()}
+	h.TaskService = service.NewTaskService(queries, testPool, nil, h.Bus)
+	h.IssueService = service.NewIssueService(queries, testPool, h.Bus, nil, h.TaskService)
+	h.AutopilotService = service.NewAutopilotService(queries, testPool, h.Bus, h.TaskService)
 	h.WorkflowSvc = service.NewWorkflowService(h.Queries, testPool)
 	h.WorkflowControl = &handler.WorkflowControl{Ready: supervisor.Ready, Tenants: workflowLiveTenants{tenants, t}, Verifier: engine, Assignments: assignments}
 	h.WorkflowSvc.Ready = supervisor.Ready
@@ -344,12 +347,14 @@ func workflowGoPackagedControlLive(t *testing.T, longHot bool) {
 	dbfx.Cleanup(t, "DELETE FROM workflow WHERE id=$1", workflow.ID)
 	dbfx.Cleanup(t, "DELETE FROM workflow_revision WHERE workflow_id=$1", workflow.ID)
 	dbfx.Cleanup(t, "DELETE FROM workflow_run WHERE workflow_id=$1", workflow.ID)
+	dbfx.Cleanup(t, "DELETE FROM workflow_operation WHERE run_id IN (SELECT id FROM workflow_run WHERE workflow_id=$1)", workflow.ID)
+	dbfx.Cleanup(t, "DELETE FROM issue WHERE origin_type='workflow' AND origin_id IN (SELECT id FROM workflow_run WHERE workflow_id=$1)", workflow.ID)
 	source := func(revision int) string {
 		hotCode := ""
 		if longHot {
 			hotCode = `if(ctx.input.longhot){await ctx.issues.get('started');await new Promise(r=>setTimeout(r,40000));}`
 		}
-		return fmt.Sprintf(`import {defineWorkflow} from '@multica/workflow-sdk'; export default defineWorkflow({steps:[{id:'work',retries:1,timeoutMs:180000,run:async ctx=>{%s if(ctx.input.retry && ctx.attempt===0) throw Error('retry');if(ctx.input.hold) await ctx.issues.get('hold');if(ctx.input.sleep) await ctx.sleep(45000);await ctx.issues.get('after');return {revision:%d,attempt:ctx.attempt};}}]});`, hotCode, revision)
+		return fmt.Sprintf(`import {defineWorkflow} from '@multica/workflow-sdk'; export default defineWorkflow({steps:[{id:'work',retries:1,timeoutMs:180000,run:async ctx=>{const p={title:'Live workflow business '+ctx.runId};const first=await ctx.issues.create('live-business',p);const replay=await ctx.issues.create('live-business',p);if(first.id!==replay.id)throw Error('business replay');%s if(ctx.input.retry && ctx.attempt===0) throw Error('retry');if(ctx.input.hold) await ctx.issues.get('hold');if(ctx.input.sleep) await ctx.sleep(45000);await ctx.issues.get('after');return {revision:%d,attempt:ctx.attempt};}}]});`, hotCode, revision)
 	}
 	graph := json.RawMessage(`{"steps":[{"id":"work","parents":[]}]}`)
 	publish, e := h.WorkflowSvc.PublishRevision(ctx, ws, workflow.ID, actor, 0, source(1), graph)
@@ -383,7 +388,10 @@ func workflowGoPackagedControlLive(t *testing.T, longHot bool) {
 			t.Fatal(err)
 		}
 		h.WorkflowSvc.Engine = workflowLiveEngine{engine, serverCred}
-		h.WorkflowControl.Action = func(context.Context, handler.WorkflowActionAuthority, handler.WorkflowActionRequest) (json.RawMessage, error) {
+		h.WorkflowControl.Action = func(ctx context.Context, a handler.WorkflowActionAuthority, req handler.WorkflowActionRequest) (json.RawMessage, error) {
+			if req.Operation == "issues.create" {
+				return h.WorkflowBusinessAction(ctx, a, req)
+			}
 			return json.RawMessage(`{"ok":true}`), nil
 		}
 		workflow, _ = h.WorkflowSvc.Load(ctx, ws, workflow.ID)
@@ -523,6 +531,9 @@ func workflowGoPackagedControlLive(t *testing.T, longHot bool) {
 	h.WorkflowControl.Action = func(actionCtx context.Context, a handler.WorkflowActionAuthority, request handler.WorkflowActionRequest) (json.RawMessage, error) {
 		if a.Principal != actor.HumanID {
 			return nil, fmt.Errorf("wrong frozen principal")
+		}
+		if request.Operation == "issues.create" {
+			return h.WorkflowBusinessAction(actionCtx, a, request)
 		}
 		var payload struct {
 			ID string `json:"id"`
@@ -830,6 +841,19 @@ func workflowGoPackagedControlLive(t *testing.T, longHot bool) {
 		t.Fatalf("stale reassigned tuple accepted: %v", err)
 	}
 	t.Logf("evicted/reassigned tuple denied task=%s oldInvocation=%d resumedInvocation=%d", resumed.EngineTaskID, evictedBinding.Invocation, resumed.Invocation)
+	for _, r := range []db.WorkflowRun{sleepRun, newRun} {
+		var issues, receipts int
+		if err := testPool.QueryRow(ctx, "SELECT count(*) FROM issue WHERE origin_type='workflow' AND origin_id=$1", r.ID).Scan(&issues); err != nil {
+			t.Fatal(err)
+		}
+		if err := testPool.QueryRow(ctx, "SELECT count(*) FROM workflow_operation WHERE run_id=$1 AND status='completed'", r.ID).Scan(&receipts); err != nil {
+			t.Fatal(err)
+		}
+		if issues != 1 || receipts != 1 {
+			t.Fatalf("real assignment/business replay duplicated: run=%s issues=%d receipts=%d", uuidToString(r.ID), issues, receipts)
+		}
+	}
+	t.Log("real native assignment + actual atomic issue producer: one issue/receipt across native retry and durable invocation replay")
 	manager.reconcile(ctx, watched)
 	if generation.retiring != nil || !engineRevoked(oldGeneration) || engineRevoked(ready.Generation) {
 		t.Fatal("completed retiring engine credential not targeted independently of healthy current")

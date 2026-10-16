@@ -2317,6 +2317,43 @@ func (q *Queries) LockDueWorkflowTriggers(ctx context.Context, arg LockDueWorkfl
 	return items, nil
 }
 
+const lockWorkflowActionCollaborators = `-- name: LockWorkflowActionCollaborators :many
+SELECT id, workspace_id, workflow_id, user_id, role, created_by_id, created_at FROM workflow_collaborator WHERE workflow_id=$1 AND workspace_id=$2 ORDER BY user_id FOR SHARE
+`
+
+type LockWorkflowActionCollaboratorsParams struct {
+	WorkflowID  pgtype.UUID `json:"workflow_id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) LockWorkflowActionCollaborators(ctx context.Context, arg LockWorkflowActionCollaboratorsParams) ([]WorkflowCollaborator, error) {
+	rows, err := q.db.Query(ctx, lockWorkflowActionCollaborators, arg.WorkflowID, arg.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []WorkflowCollaborator{}
+	for rows.Next() {
+		var i WorkflowCollaborator
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.WorkflowID,
+			&i.UserID,
+			&i.Role,
+			&i.CreatedByID,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockWorkflowActionMembership = `-- name: LockWorkflowActionMembership :one
 SELECT id, workspace_id, user_id, role, created_at FROM member WHERE workspace_id=$1 AND user_id=$2 FOR SHARE
 `
@@ -2392,6 +2429,67 @@ func (q *Queries) LockWorkflowActionRun(ctx context.Context, arg LockWorkflowAct
 		&i.FinalProjectionAttempts,
 	)
 	return i, err
+}
+
+const lockWorkflowAgentInvocationTargets = `-- name: LockWorkflowAgentInvocationTargets :many
+SELECT id, agent_id, target_type, target_id, created_by, created_at FROM agent_invocation_target WHERE agent_id=$1 ORDER BY id FOR SHARE
+`
+
+func (q *Queries) LockWorkflowAgentInvocationTargets(ctx context.Context, agentID pgtype.UUID) ([]AgentInvocationTarget, error) {
+	rows, err := q.db.Query(ctx, lockWorkflowAgentInvocationTargets, agentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AgentInvocationTarget{}
+	for rows.Next() {
+		var i AgentInvocationTarget
+		if err := rows.Scan(
+			&i.ID,
+			&i.AgentID,
+			&i.TargetType,
+			&i.TargetID,
+			&i.CreatedBy,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockWorkflowAutopilotCollaborators = `-- name: LockWorkflowAutopilotCollaborators :many
+SELECT autopilot_id, user_type, user_id, granted_by, created_at FROM autopilot_collaborator WHERE autopilot_id=$1 ORDER BY user_id FOR SHARE
+`
+
+func (q *Queries) LockWorkflowAutopilotCollaborators(ctx context.Context, autopilotID pgtype.UUID) ([]AutopilotCollaborator, error) {
+	rows, err := q.db.Query(ctx, lockWorkflowAutopilotCollaborators, autopilotID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AutopilotCollaborator{}
+	for rows.Next() {
+		var i AutopilotCollaborator
+		if err := rows.Scan(
+			&i.AutopilotID,
+			&i.UserType,
+			&i.UserID,
+			&i.GrantedBy,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const lockWorkflowForUpdate = `-- name: LockWorkflowForUpdate :one

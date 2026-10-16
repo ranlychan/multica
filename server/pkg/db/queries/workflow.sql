@@ -9,6 +9,12 @@ SELECT * FROM workflow WHERE id=$1 AND workspace_id=$2;
 SELECT * FROM member WHERE workspace_id=$1 AND user_id=$2 FOR SHARE;
 -- name: LockWorkflowActionRun :one
 SELECT * FROM workflow_run WHERE id=$1 AND workspace_id=$2 FOR UPDATE;
+-- name: LockWorkflowActionCollaborators :many
+SELECT * FROM workflow_collaborator WHERE workflow_id=$1 AND workspace_id=$2 ORDER BY user_id FOR SHARE;
+-- name: LockWorkflowAgentInvocationTargets :many
+SELECT * FROM agent_invocation_target WHERE agent_id=$1 ORDER BY id FOR SHARE;
+-- name: LockWorkflowAutopilotCollaborators :many
+SELECT * FROM autopilot_collaborator WHERE autopilot_id=$1 ORDER BY user_id FOR SHARE;
 -- name: LockWorkflowForUpdate :one
 SELECT * FROM workflow WHERE id=$1 AND workspace_id=$2 FOR UPDATE;
 -- name: CreateWorkflow :one

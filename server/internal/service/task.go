@@ -552,6 +552,13 @@ func (s *TaskService) attributionForIssueTask(ctx context.Context, issue db.Issu
 	// identically. (A manual trigger carries an actor and is already handled above.)
 	// The issue only stores the autopilot id, so bridge issue → active run →
 	// trigger_id to find the trigger.
+	if s != nil {
+		if run, ok := s.workflowRunForIssue(ctx, s.Queries, issue); ok {
+			attr := attribution.DirectHumanRun(run.PrincipalUserID, attribution.EvidenceIssueAssignment, issue.ID)
+			attr.Source = attribution.Source("workflow")
+			return attr
+		}
+	}
 	if s != nil && s.Queries != nil && issue.OriginType.Valid &&
 		issue.OriginType.String == "autopilot" && issue.OriginID.Valid {
 		var triggerID pgtype.UUID
@@ -1250,15 +1257,16 @@ func (s *TaskService) enqueueIssueTask(ctx context.Context, issue db.Issue, trig
 }
 
 func (s *TaskService) enqueueIssueTaskWithCommentPlan(ctx context.Context, issue db.Issue, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, forceFreshSession bool, handoffNote string, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, fireAt pgtype.Timestamptz, origin RunOrigin) (db.AgentTaskQueue, error) {
+	q := s.Queries
 	if !issue.AssigneeID.Valid {
 		slog.Error("task enqueue failed", "issue_id", util.UUIDToString(issue.ID), "error", "issue has no assignee")
 		return db.AgentTaskQueue{}, fmt.Errorf("issue has no assignee")
 	}
-	if err := guardIssueNotInTriage(ctx, s.Queries, issue.ID, origin); err != nil {
+	if err := guardIssueNotInTriage(ctx, q, issue.ID, origin); err != nil {
 		return db.AgentTaskQueue{}, err
 	}
 
-	agent, err := s.Queries.GetAgent(ctx, issue.AssigneeID)
+	agent, err := q.GetAgent(ctx, issue.AssigneeID)
 	if err != nil {
 		slog.Error("task enqueue failed", "issue_id", util.UUIDToString(issue.ID), "error", err)
 		return db.AgentTaskQueue{}, fmt.Errorf("load agent: %w", err)
@@ -1288,7 +1296,14 @@ func (s *TaskService) enqueueIssueTaskWithCommentPlan(ctx context.Context, issue
 	originatorUserID := attr.UserID
 	runtimeMCPOverlay := s.buildRuntimeMCPOverlay(ctx, originatorUserID, agent)
 	attrSource, attrDelegatedFrom, attrEvidenceKind, attrEvidenceRef := attributionCreateParams(attr)
+	var workflowRunID pgtype.UUID
+	if !actorUserID.Valid {
+		if run, ok := s.workflowRunForIssue(ctx, q, issue); ok {
+			workflowRunID = run.ID
+		}
+	}
 	createParams := db.CreateAgentTaskParams{
+		WorkflowRunID:        workflowRunID,
 		ID:                   dbid.NewV7(),
 		AgentID:              issue.AssigneeID,
 		RuntimeID:            agent.RuntimeID,
@@ -1315,7 +1330,7 @@ func (s *TaskService) enqueueIssueTaskWithCommentPlan(ctx context.Context, issue
 	}
 	var task db.AgentTaskQueue
 	if fireAt.Valid {
-		task, err = s.Queries.CreateDeferredChannelIssueTask(ctx, db.CreateDeferredChannelIssueTaskParams{
+		task, err = q.CreateDeferredChannelIssueTask(ctx, db.CreateDeferredChannelIssueTaskParams{
 			ID:                   dbid.NewV7(),
 			AgentID:              createParams.AgentID,
 			RuntimeID:            createParams.RuntimeID,
@@ -1342,7 +1357,7 @@ func (s *TaskService) enqueueIssueTaskWithCommentPlan(ctx context.Context, issue
 			FireAt:               fireAt,
 		})
 	} else {
-		task, err = s.Queries.CreateAgentTask(ctx, createParams)
+		task, err = q.CreateAgentTask(ctx, createParams)
 	}
 	if err != nil {
 		// A concurrent enqueue for the same (issue, agent) won the race and the
@@ -1426,11 +1441,15 @@ func (s *TaskService) enqueueMentionTask(ctx context.Context, issue db.Issue, ag
 	return s.enqueueMentionTaskWithCommentPlan(ctx, issue, agentID, triggerCommentID, nil, isLeader, squadID, forceFreshSession, handoffNote, actorUserID, rerunOfTaskID, origin)
 }
 
-func (s *TaskService) enqueueMentionTaskWithCommentPlan(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, isLeader bool, squadID pgtype.UUID, forceFreshSession bool, handoffNote string, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, origin RunOrigin) (db.AgentTaskQueue, error) {
-	if err := guardIssueNotInTriage(ctx, s.Queries, issue.ID, origin); err != nil {
+func (s *TaskService) enqueueMentionTaskWithCommentPlan(ctx context.Context, issue db.Issue, agentID pgtype.UUID, triggerCommentID pgtype.UUID, coalescedCommentIDs []pgtype.UUID, isLeader bool, squadID pgtype.UUID, forceFreshSession bool, handoffNote string, actorUserID pgtype.UUID, rerunOfTaskID pgtype.UUID, origin RunOrigin, workflow ...WorkflowTaskEnqueue) (db.AgentTaskQueue, error) {
+	q := s.Queries
+	if len(workflow) > 0 {
+		q = workflow[0].Queries
+	}
+	if err := guardIssueNotInTriage(ctx, q, issue.ID, origin); err != nil {
 		return db.AgentTaskQueue{}, err
 	}
-	agent, err := s.Queries.GetAgent(ctx, agentID)
+	agent, err := q.GetAgent(ctx, agentID)
 	if err != nil {
 		slog.Error("mention task enqueue failed: agent not found", "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID), "error", err)
 		return db.AgentTaskQueue{}, fmt.Errorf("load agent: %w", err)
@@ -1457,9 +1476,29 @@ func (s *TaskService) enqueueMentionTaskWithCommentPlan(ctx context.Context, iss
 		return db.AgentTaskQueue{}, err
 	}
 	originatorUserID := attr.UserID
-	runtimeMCPOverlay := s.buildRuntimeMCPOverlay(ctx, originatorUserID, agent)
+	var runtimeMCPOverlay runtimeMCPOverlayData
+	if len(workflow) > 0 {
+		runtimeMCPOverlay = workflow[0].overlay
+	} else {
+		runtimeMCPOverlay = s.buildRuntimeMCPOverlay(ctx, originatorUserID, agent)
+	}
 	attrSource, attrDelegatedFrom, attrEvidenceKind, attrEvidenceRef := attributionCreateParams(attr)
-	task, err := s.Queries.CreateAgentTask(ctx, db.CreateAgentTaskParams{
+	var workflowRunID pgtype.UUID
+	if !actorUserID.Valid {
+		if run, ok := s.workflowRunForIssue(ctx, q, issue); ok {
+			workflowRunID = run.ID
+		}
+	}
+	if len(workflow) > 0 {
+		workflowRunID = workflow[0].RunID
+		attrSource = pgtype.Text{String: "workflow", Valid: true}
+	}
+	if len(workflow) > 0 && workflow[0].AutopilotRunID.Valid {
+		attrEvidenceKind = pgtype.Text{String: string(attribution.EvidenceAutopilotRun), Valid: true}
+		attrEvidenceRef = workflow[0].AutopilotRunID
+	}
+	task, err := q.CreateAgentTask(ctx, db.CreateAgentTaskParams{
+		WorkflowRunID:        workflowRunID,
 		ID:                   dbid.NewV7(),
 		AgentID:              agentID,
 		RuntimeID:            agent.RuntimeID,
@@ -1501,6 +1540,9 @@ func (s *TaskService) enqueueMentionTaskWithCommentPlan(ctx context.Context, iss
 	}
 
 	slog.Info("mention task enqueued", "task_id", util.UUIDToString(task.ID), "issue_id", util.UUIDToString(issue.ID), "agent_id", util.UUIDToString(agentID), "is_leader_task", isLeader)
+	if len(workflow) > 0 {
+		return task, nil
+	}
 	// See EnqueueTaskForIssue for ordering rationale.
 	s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, task)
 	s.NotifyTaskEnqueued(ctx, task)

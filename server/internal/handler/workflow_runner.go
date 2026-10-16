@@ -584,32 +584,32 @@ func (h *Handler) WorkflowRunnerEligible(ctx context.Context, ws, rev pgtype.UUI
 func (h *Handler) WorkflowRunnerAction(w http.ResponseWriter, r *http.Request) {
 	workflowPrivate(w)
 	if !h.workflowControlReady() {
-		workflowDenied(w, 503, "workflow_unavailable")
+		workflowActionDenied(w, 503, "workflow_unavailable")
 		return
 	}
 	ws, e := util.ParseUUID(r.Header.Get("X-Workspace-ID"))
 	if e != nil {
-		workflowDenied(w, 401, "workflow_unauthenticated")
+		workflowActionDenied(w, 401, "workflow_unauthenticated")
 		return
 	}
 	gen, e := util.ParseUUID(r.Header.Get("X-Multica-Workflow-Generation"))
 	if e != nil {
-		workflowDenied(w, 401, "workflow_unauthenticated")
+		workflowActionDenied(w, 401, "workflow_unauthenticated")
 		return
 	}
 	secret := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !strings.HasPrefix(secret, "wrt_") {
-		workflowDenied(w, 401, "workflow_unauthenticated")
+		workflowActionDenied(w, 401, "workflow_unauthenticated")
 		return
 	}
 	token, e := h.Queries.AuthorizeWorkflowRunner(r.Context(), db.AuthorizeWorkflowRunnerParams{WorkspaceID: ws, ID: gen, TokenHash: auth.HashToken(secret)})
 	if e != nil || !token.LeaseUntil.Valid || !time.Now().Before(token.LeaseUntil.Time) {
-		workflowDenied(w, 410, "workflow_capability_revoked")
+		workflowActionDenied(w, 410, "workflow_capability_revoked")
 		return
 	}
 	body, e := io.ReadAll(http.MaxBytesReader(w, r.Body, (64<<10)+2048))
 	if e != nil {
-		workflowDenied(w, 400, "workflow_invalid_payload")
+		workflowActionDenied(w, 400, "workflow_invalid_payload")
 		return
 	}
 	sig, e := hex.DecodeString(r.Header.Get("X-Multica-Workflow-Signature"))
@@ -617,26 +617,26 @@ func (h *Handler) WorkflowRunnerAction(w http.ResponseWriter, r *http.Request) {
 	mac.Write([]byte("POST\n" + r.URL.EscapedPath() + "\n" + uuidToString(ws) + "\n" + uuidToString(gen) + "\n"))
 	mac.Write(body)
 	if e != nil || !hmac.Equal(sig, mac.Sum(nil)) {
-		workflowDenied(w, 401, "workflow_unauthenticated")
+		workflowActionDenied(w, 401, "workflow_unauthenticated")
 		return
 	}
 	var req WorkflowActionRequest
 	if json.Unmarshal(body, &req) != nil || req.Protocol != 1 || req.RunID != chi.URLParam(r, "id") || req.Attempt < 0 || len(req.OperationKey) > 256 || service.ValidateWorkflowPayload(req.Payload) != nil {
-		workflowDenied(w, 400, "workflow_invalid_payload")
+		workflowActionDenied(w, 400, "workflow_invalid_payload")
 		return
 	}
 	id, e := util.ParseUUID(req.RunID)
 	if e != nil {
-		workflowDenied(w, 404, "workflow_not_found")
+		workflowActionDenied(w, 404, "workflow_not_found")
 		return
 	}
 	run, e := h.Queries.GetWorkflowRunInWorkspace(r.Context(), db.GetWorkflowRunInWorkspaceParams{ID: id, WorkspaceID: ws})
 	if e != nil {
-		workflowDenied(w, 404, "workflow_not_found")
+		workflowActionDenied(w, 404, "workflow_not_found")
 		return
 	}
 	if (run.Status != "running" && run.Status != "submitting") || run.CancelRequestedAt.Valid {
-		workflowDenied(w, 410, "workflow_capability_revoked")
+		workflowActionDenied(w, 410, "workflow_capability_revoked")
 		return
 	}
 	rev, e := h.Queries.GetWorkflowRevisionInWorkspace(r.Context(), db.GetWorkflowRevisionInWorkspaceParams{ID: run.RevisionID, WorkspaceID: ws})
@@ -644,7 +644,7 @@ func (h *Handler) WorkflowRunnerAction(w http.ResponseWriter, r *http.Request) {
 	_ = json.Unmarshal(token.Registrations, &registered)
 	evidence, exists := registered[uuidToString(run.RevisionID)]
 	if e != nil || !exists || evidence.Hash != run.DefinitionHash || rev.DefinitionHash != run.DefinitionHash {
-		workflowDenied(w, 403, "workflow_forbidden")
+		workflowActionDenied(w, 403, "workflow_forbidden")
 		return
 	}
 	stepOK := false
@@ -654,35 +654,35 @@ func (h *Handler) WorkflowRunnerAction(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !stepOK {
-		workflowDenied(w, 403, "workflow_forbidden")
+		workflowActionDenied(w, 403, "workflow_forbidden")
 		return
 	}
 	workflow, e := h.WorkflowSvc.Load(r.Context(), ws, run.WorkflowID)
 	if e != nil || h.WorkflowSvc.Authorize(r.Context(), workflow, service.WorkflowActor{HumanID: run.PrincipalUserID}, false) != nil {
-		workflowDenied(w, 403, "workflow_forbidden")
+		workflowActionDenied(w, 403, "workflow_forbidden")
 		return
 	}
 	if h.WorkflowControl.Assignments == nil || h.WorkflowControl.Action == nil {
-		workflowDenied(w, 503, "workflow_unavailable")
+		workflowActionDenied(w, 503, "workflow_unavailable")
 		return
 	}
-	if req.Attempt > math.MaxInt32 || req.InvocationCount < 1 || req.InvocationCount > math.MaxInt32 || len(req.StepID) > 128 {
-		workflowDenied(w, 403, "workflow_forbidden")
+	if req.Attempt >= math.MaxInt32 || req.InvocationCount < 1 || req.InvocationCount > math.MaxInt32 || len(req.StepID) > 128 {
+		workflowActionDenied(w, 403, "workflow_forbidden")
 		return
 	}
 	engineID, idErr := util.ParseUUID(req.EngineRunID)
 	_, taskErr := util.ParseUUID(req.EngineTaskID)
 	if idErr != nil || taskErr != nil || (run.HatchetRunID.Valid && run.HatchetRunID != engineID) {
-		workflowDenied(w, 403, "workflow_forbidden")
+		workflowActionDenied(w, 403, "workflow_forbidden")
 		return
 	}
 	if h.WorkflowControl.Tenants == nil {
-		workflowDenied(w, 503, "workflow_unavailable")
+		workflowActionDenied(w, 503, "workflow_unavailable")
 		return
 	}
 	cred, e := h.WorkflowControl.Tenants.MappedCredentials(r.Context(), ws)
 	if e != nil || cred.TenantID != token.TenantID {
-		workflowDenied(w, 503, "workflow_unavailable")
+		workflowActionDenied(w, 503, "workflow_unavailable")
 		return
 	}
 	assignment := hatchet.Assignment{TenantID: cred.TenantID, EngineRunID: req.EngineRunID, EngineTaskID: req.EngineTaskID, WorkflowID: evidence.EngineWorkflowID, VersionID: evidence.EngineVersionID, WorkerName: "multica-" + uuidToString(token.ID), Retry: req.Attempt, Invocation: req.InvocationCount}
@@ -693,7 +693,7 @@ func (h *Handler) WorkflowRunnerAction(w http.ResponseWriter, r *http.Request) {
 	}
 	if !run.HatchetRunID.Valid {
 		if run.Status != "submitting" || run.SubmissionAttempts < 1 || !run.SubmissionStartedAt.Valid || !run.SubmissionDeadline.Valid || !time.Now().Before(run.SubmissionDeadline.Time) {
-			workflowDenied(w, 503, "workflow_unavailable")
+			workflowActionDenied(w, 503, "workflow_unavailable")
 			return
 		}
 		assignment.LocalRunID, assignment.SubmissionStartedAt, assignment.SubmissionDeadline = req.RunID, run.SubmissionStartedAt.Time, run.SubmissionDeadline.Time
@@ -703,19 +703,20 @@ func (h *Handler) WorkflowRunnerAction(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(e, hatchet.ErrAssignmentDenied) {
 			status, code = 403, "workflow_forbidden"
 		}
-		workflowDenied(w, status, code)
+		workflowActionDenied(w, status, code)
 		return
 	}
 	// No engine I/O under local locks. The fresh transaction fences local grants
 	// before first binding; Task6b must repeat that fence in its receipt transaction.
 	authority, status, code := h.bindWorkflowAssignment(r.Context(), ws, gen, auth.HashToken(secret), run, evidence, engineID, assignment.LocalRunID != "")
 	if status != 0 {
-		workflowDenied(w, status, code)
+		workflowActionDenied(w, status, code)
 		return
 	}
 	result, e := h.WorkflowControl.Action(r.Context(), authority, req)
 	if e != nil {
-		workflowDenied(w, 409, "workflow_operation_conflict")
+		status, code := workflowBusinessFailure(e)
+		workflowActionDenied(w, status, code)
 		return
 	}
 	writeJSON(w, 200, map[string]json.RawMessage{"result": result})
