@@ -5,6 +5,10 @@ SELECT * FROM workflow WHERE workspace_id=$1 ORDER BY created_at DESC;
 SELECT * FROM workflow WHERE workspace_id=$1 ORDER BY created_at DESC,id DESC LIMIT $2 OFFSET $3;
 -- name: GetWorkflowInWorkspace :one
 SELECT * FROM workflow WHERE id=$1 AND workspace_id=$2;
+-- name: LockWorkflowActionMembership :one
+SELECT * FROM member WHERE workspace_id=$1 AND user_id=$2 FOR SHARE;
+-- name: LockWorkflowActionRun :one
+SELECT * FROM workflow_run WHERE id=$1 AND workspace_id=$2 FOR UPDATE;
 -- name: LockWorkflowForUpdate :one
 SELECT * FROM workflow WHERE id=$1 AND workspace_id=$2 FOR UPDATE;
 -- name: CreateWorkflow :one
@@ -151,6 +155,13 @@ SELECT now()::timestamptz;
 -- name: AcknowledgeWorkflowRun :one
 UPDATE workflow_run SET status='running',hatchet_run_id=$3,started_at=now()
 WHERE id=$1 AND workspace_id=$2 AND status='submitting' RETURNING *;
+-- name: BindWorkflowActionEngineRun :one
+UPDATE workflow_run SET status='running',hatchet_run_id=$3,started_at=now()
+WHERE id=$1 AND workspace_id=$2 AND status='submitting' AND hatchet_run_id IS NULL
+AND cancel_requested_at IS NULL AND submission_attempts>0
+AND submission_started_at IS NOT NULL AND submission_deadline>now()
+AND submission_deadline <= submission_started_at + interval '55 minutes'
+RETURNING *;
 -- name: AcknowledgeWorkflowSubmissionAttempt :one
 UPDATE workflow_run SET status='running',hatchet_run_id=$3,started_at=now()
 WHERE id=$1 AND workspace_id=$2 AND status='submitting' AND submission_attempts=$4 AND submission_lease_until>now() RETURNING *;

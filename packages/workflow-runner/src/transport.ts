@@ -2,6 +2,11 @@ import { createHmac } from 'node:crypto';
 import { limits, validateJSON, redactJSON, WorkflowError, type ActionTransport } from '@multica/workflow-sdk';
 import type { WorkerDescriptor } from './contracts.js';
 
+/** Private native selectors are read for each call, outside the author API. */
+export function assignedTransport(product: ActionTransport, context: { workflowRunId(): string; taskRunExternalId(): string; readonly invocationCount: number }): ActionTransport {
+  return request => product({ ...request, engine_run_id: context.workflowRunId(), engine_task_id: context.taskRunExternalId(), invocation_count: context.invocationCount } as Parameters<ActionTransport>[0]);
+}
+
 /** Axios adapter rejects before network dispatch, including constructor tenant probe. */
 export async function denyEngineREST(_config?: unknown): Promise<never> { throw new WorkflowError('workflow_engine_rest_denied'); }
 

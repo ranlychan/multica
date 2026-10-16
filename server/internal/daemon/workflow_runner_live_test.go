@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -14,10 +15,12 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multica-ai/multica/server/internal/events"
@@ -34,6 +37,31 @@ import (
 type workflowLiveEngine struct {
 	client *hatchet.Client
 	cred   hatchet.TenantCredentials
+}
+
+// Keep the real engine response private until the worker's first action finishes.
+type workflowLivePreACKEngine struct {
+	workflowLiveEngine
+	action  <-chan struct{}
+	lost    bool
+	submits atomic.Int32
+}
+
+func (e *workflowLivePreACKEngine) Submit(ctx context.Context, r db.WorkflowRun, v db.WorkflowRevision) (string, error) {
+	e.submits.Add(1)
+	id, err := e.workflowLiveEngine.Submit(ctx, r, v)
+	if err != nil {
+		return "", err
+	}
+	select {
+	case <-e.action:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+	if e.lost {
+		return "", errors.New("test accepted response lost")
+	}
+	return id, nil
 }
 
 type workflowLiveTenants struct {
@@ -92,6 +120,17 @@ func (e workflowLiveEngine) Cancel(ctx context.Context, r db.WorkflowRun) error 
 }
 
 func TestWorkflowGoPackagedControlLive(t *testing.T) {
+	workflowGoPackagedControlLive(t, false)
+}
+
+func TestWorkflowGoPackagedLongHotAssignmentLive(t *testing.T) {
+	if os.Getenv("MULTICA_WORKFLOW_LONG_HOT_LIVE") != "1" {
+		t.Skip("explicit long-hot assignment boundary proof")
+	}
+	workflowGoPackagedControlLive(t, true)
+}
+
+func workflowGoPackagedControlLive(t *testing.T, longHot bool) {
 	if os.Getenv("MULTICA_WORKFLOW_CONTROL_LIVE") != "1" {
 		t.Skip("explicit disposable engine/Node proof")
 	}
@@ -138,6 +177,14 @@ func TestWorkflowGoPackagedControlLive(t *testing.T) {
 		time.Sleep(250 * time.Millisecond)
 	}
 	config := hatchet.Config{Enabled: true, DatabaseURL: "postgres://postgres:workflow-proof@" + pgport + "/hatchet?sslmode=disable", APIURL: "http://" + port(), GRPCAddress: port(), TLSStrategy: "mtls", StateDir: filepath.Join(root, "state"), BinaryDir: os.Getenv("HATCHET_BIN_DIR"), ProvisioningEmail: "proof@example.com", ProvisioningPassword: "DisposablePassword123!", StartupTimeout: 90 * time.Second, ShutdownTimeout: 15 * time.Second}
+	assignments, err := hatchet.NewAssignmentVerifier(ctx, config.DatabaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer assignments.Close()
+	if assignments.Check(ctx) == nil {
+		t.Fatal("assignment ready before engine migrations")
+	}
 	supervisor := hatchet.NewSupervisor(config, nil)
 	defer func() {
 		stop, c := context.WithTimeout(context.Background(), 20*time.Second)
@@ -146,6 +193,9 @@ func TestWorkflowGoPackagedControlLive(t *testing.T) {
 	}()
 	if e := supervisor.Start(ctx); e != nil {
 		t.Fatal(e)
+	}
+	if err := assignments.Check(ctx); err != nil {
+		t.Fatal("assignment schema unavailable after migrations", err)
 	}
 	engine, _ := hatchet.NewClient(config.APIURL, &http.Client{Transport: workflowLiveTransport{t}, Timeout: 30 * time.Second})
 	box, _ := secretbox.New(make([]byte, secretbox.KeySize))
@@ -156,7 +206,7 @@ func TestWorkflowGoPackagedControlLive(t *testing.T) {
 	dbfx.Cleanup(t, "DELETE FROM workflow_hatchet_tenant WHERE workspace_id=$1", testWorkspaceID)
 	h := handler.Handler{Queries: queries, TxStarter: testPool, Bus: events.New()}
 	h.WorkflowSvc = service.NewWorkflowService(h.Queries, testPool)
-	h.WorkflowControl = &handler.WorkflowControl{Ready: supervisor.Ready, Tenants: workflowLiveTenants{tenants, t}, Verifier: engine}
+	h.WorkflowControl = &handler.WorkflowControl{Ready: supervisor.Ready, Tenants: workflowLiveTenants{tenants, t}, Verifier: engine, Assignments: assignments}
 	h.WorkflowSvc.Ready = supervisor.Ready
 	h.WorkflowSvc.Eligible = h.WorkflowRunnerEligible
 	router := chi.NewRouter()
@@ -223,7 +273,30 @@ func TestWorkflowGoPackagedControlLive(t *testing.T) {
 	router.Post("/api/daemon/workflows/retire", h.WorkflowRunnerRetire)
 	router.Post("/api/daemon/workflows/validation-failed", h.WorkflowRunnerValidationFailed)
 	router.Post("/api/daemon/workflows/revoke", h.WorkflowRunnerRevoke)
-	router.Post("/api/workflow-runs/{id}/actions", h.WorkflowRunnerAction)
+	type actionResponse struct {
+		request    handler.WorkflowActionRequest
+		generation string
+		status     int
+	}
+	responses := make(chan actionResponse, 16)
+	router.Post("/api/workflow-runs/{id}/actions", func(w http.ResponseWriter, r *http.Request) {
+		if !longHot {
+			h.WorkflowRunnerAction(w, r)
+			return
+		}
+		raw, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(raw))
+		var req handler.WorkflowActionRequest
+		_ = json.Unmarshal(raw, &req)
+		rec := httptest.NewRecorder()
+		h.WorkflowRunnerAction(rec, r)
+		responses <- actionResponse{req, r.Header.Get("X-Multica-Workflow-Generation"), rec.Code}
+		for k, values := range rec.Header() {
+			w.Header()[k] = values
+		}
+		w.WriteHeader(rec.Code)
+		_, _ = w.Write(rec.Body.Bytes())
+	})
 	product := httptest.NewServer(router)
 	defer product.Close()
 	call := func(method, path, token, workspace string, body, out any) int {
@@ -272,7 +345,11 @@ func TestWorkflowGoPackagedControlLive(t *testing.T) {
 	dbfx.Cleanup(t, "DELETE FROM workflow_revision WHERE workflow_id=$1", workflow.ID)
 	dbfx.Cleanup(t, "DELETE FROM workflow_run WHERE workflow_id=$1", workflow.ID)
 	source := func(revision int) string {
-		return fmt.Sprintf(`import {defineWorkflow} from '@multica/workflow-sdk'; export default defineWorkflow({steps:[{id:'work',retries:1,timeoutMs:180000,run:async ctx=>{if(ctx.input.retry && ctx.attempt===0) throw Error('retry');if(ctx.input.hold) await ctx.issues.get('hold');if(ctx.input.sleep) await ctx.sleep(45000);await ctx.issues.get('after');return {revision:%d,attempt:ctx.attempt};}}]});`, revision)
+		hotCode := ""
+		if longHot {
+			hotCode = `if(ctx.input.longhot){await ctx.issues.get('started');await new Promise(r=>setTimeout(r,40000));}`
+		}
+		return fmt.Sprintf(`import {defineWorkflow} from '@multica/workflow-sdk'; export default defineWorkflow({steps:[{id:'work',retries:1,timeoutMs:180000,run:async ctx=>{%s if(ctx.input.retry && ctx.attempt===0) throw Error('retry');if(ctx.input.hold) await ctx.issues.get('hold');if(ctx.input.sleep) await ctx.sleep(45000);await ctx.issues.get('after');return {revision:%d,attempt:ctx.attempt};}}]});`, hotCode, revision)
 	}
 	graph := json.RawMessage(`{"steps":[{"id":"work","parents":[]}]}`)
 	publish, e := h.WorkflowSvc.PublishRevision(ctx, ws, workflow.ID, actor, 0, source(1), graph)
@@ -300,6 +377,83 @@ func TestWorkflowGoPackagedControlLive(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer enginePool.Close()
+	if longHot {
+		serverCred, err := tenants.MappedCredentials(ctx, ws)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.WorkflowSvc.Engine = workflowLiveEngine{engine, serverCred}
+		h.WorkflowControl.Action = func(context.Context, handler.WorkflowActionAuthority, handler.WorkflowActionRequest) (json.RawMessage, error) {
+			return json.RawMessage(`{"ok":true}`), nil
+		}
+		workflow, _ = h.WorkflowSvc.Load(ctx, ws, workflow.ID)
+		run, err := h.WorkflowSvc.AdmitRun(ctx, workflow, actor, "manual", pgtype.UUID{}, json.RawMessage(`{"longhot":true}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var original actionResponse
+		select {
+		case original = <-responses:
+		case <-time.After(15 * time.Second):
+			t.Fatal("long-hot run did not enter SDK")
+		}
+		if original.generation != oldGeneration || original.status != 200 {
+			t.Fatalf("long-hot initial action failed: %+v", original)
+		}
+		publish2, err := h.WorkflowSvc.PublishRevision(ctx, ws, workflow.ID, actor, 1, source(2), graph)
+		if err != nil {
+			t.Fatal(err)
+		}
+		manager.reconcile(ctx, watched)
+		if generation.retiring == nil || generation.retiring.process != child || !h.WorkflowRunnerEligible(ctx, ws, publish2.Revision.ID) {
+			t.Fatal("long-hot staged replacement failed")
+		}
+		t.Logf("long-hot old=%s current=%s local=%s engine=%s task=%s", oldGeneration, generation.ready.Generation, uuidToString(run.ID), original.request.EngineRunID, original.request.EngineTaskID)
+		var oldWorkerID string
+		if err := enginePool.QueryRow(ctx, `SELECT id::text FROM "Worker" WHERE "tenantId"=$1 AND name=$2`, serverCred.TenantID, "multica-"+oldGeneration).Scan(&oldWorkerID); err != nil {
+			t.Fatal(err)
+		}
+		// JS-active work is neither a durable sleep nor an HTTP request held past
+		// the transport's10second deadline. Inspect only normal engine-owned rows.
+		deadline := time.NewTimer(50 * time.Second)
+		defer deadline.Stop()
+		for {
+			select {
+			case response := <-responses:
+				var payload struct {
+					ID string `json:"id"`
+				}
+				_ = json.Unmarshal(response.request.Payload, &payload)
+				t.Logf("long-hot observed SDK generation=%s invocation=%d payloadID=%s status=%d", response.generation, response.request.InvocationCount, payload.ID, response.status)
+				var heartbeatAge float64
+				var active, deleted bool
+				var assigned *string
+				var invocation int
+				if err := enginePool.QueryRow(ctx, `SELECT extract(epoch FROM now()-w."lastHeartbeatAt"),w."isActive",w."deletedAt" IS NOT NULL,rt.worker_id::text,lf.latest_invocation_count FROM "Worker" w JOIN v1_lookup_table k ON k.tenant_id=w."tenantId" AND k.external_id=$2 JOIN v1_task t ON (t.id,t.inserted_at)=(k.task_id,k.inserted_at) LEFT JOIN v1_task_runtime rt ON (rt.task_id,rt.task_inserted_at,rt.retry_count)=(t.id,t.inserted_at,t.retry_count) JOIN v1_durable_event_log_file lf ON (lf.durable_task_id,lf.durable_task_inserted_at)=(t.id,t.inserted_at) WHERE w."tenantId"=$1 AND w.name=$3`, serverCred.TenantID, original.request.EngineTaskID, "multica-"+oldGeneration).Scan(&heartbeatAge, &active, &deleted, &assigned, &invocation); err != nil {
+					t.Fatal(err)
+				}
+				assignedID := "<none>"
+				if assigned != nil {
+					assignedID = *assigned
+				}
+				t.Logf("long-hot engine state oldHeartbeatAge=%.3fs oldActive=%t oldDeleted=%t currentWorker=%s invocation=%d", heartbeatAge, active, deleted, assignedID, invocation)
+				if response.generation != oldGeneration {
+					t.Error("long-hot work unexpectedly reassigned during retirement")
+				}
+				if response.generation == oldGeneration && payload.ID == "after" {
+					if response.status != 200 {
+						t.Fatalf("long-hot retiring SDK lost current assignment before original credential/step deadline: status=%d engine=%s task=%s", response.status, original.request.EngineRunID, original.request.EngineTaskID)
+					}
+					if invocation != original.request.InvocationCount || response.request.InvocationCount != original.request.InvocationCount || assignedID != oldWorkerID || active || deleted || heartbeatAge > 10 {
+						t.Fatalf("long-hot continuation changed assignment or stopped heartbeat: worker=%s expected=%s invocation=%d expected=%d active=%t deleted=%t heartbeatAge=%.3f", assignedID, oldWorkerID, invocation, original.request.InvocationCount, active, deleted, heartbeatAge)
+					}
+					return
+				}
+			case <-deadline.C:
+				t.Fatalf("long-hot retiring SDK never returned engine=%s task=%s", original.request.EngineRunID, original.request.EngineTaskID)
+			}
+		}
+	}
 	engineRevoked := func(generation string) bool {
 		t.Helper()
 		var tokenID string
@@ -359,8 +513,13 @@ func TestWorkflowGoPackagedControlLive(t *testing.T) {
 			close(release)
 		}
 	})
-	type actionObservation struct{ generation, run string }
+	type actionObservation struct {
+		generation, run string
+		request         handler.WorkflowActionRequest
+	}
 	after := make(chan actionObservation, 10)
+	var preACKActions sync.Map
+	var observedAssignments sync.Map
 	h.WorkflowControl.Action = func(actionCtx context.Context, a handler.WorkflowActionAuthority, request handler.WorkflowActionRequest) (json.RawMessage, error) {
 		if a.Principal != actor.HumanID {
 			return nil, fmt.Errorf("wrong frozen principal")
@@ -369,6 +528,72 @@ func TestWorkflowGoPackagedControlLive(t *testing.T) {
 			ID string `json:"id"`
 		}
 		_ = json.Unmarshal(request.Payload, &payload)
+		var registrations map[string]wr.Registration
+		_ = json.Unmarshal(a.Runner.Registrations, &registrations)
+		registration := registrations[uuidToString(a.Run.RevisionID)]
+		binding := hatchet.Assignment{TenantID: a.Runner.TenantID, EngineRunID: request.EngineRunID, EngineTaskID: request.EngineTaskID, WorkflowID: registration.EngineWorkflowID, VersionID: registration.EngineVersionID, Retry: request.Attempt, Invocation: request.InvocationCount, WorkerName: "multica-" + uuidToString(a.Runner.ID)}
+		for _, step := range registration.Actions {
+			if step.StepID == request.StepID {
+				binding.TaskName, binding.ActionID = step.TaskName, step.ActionID
+			}
+		}
+		observedAssignments.Store(uuidToString(a.Run.ID), binding)
+		// These queries inspect actual assigned rows, never fixtures inserted in the engine DB.
+		for name, mutate := range map[string]func(*hatchet.Assignment){
+			"tenant": func(b *hatchet.Assignment) { b.TenantID = uuid.NewString() }, "run": func(b *hatchet.Assignment) { b.EngineRunID = uuid.NewString() }, "task": func(b *hatchet.Assignment) { b.EngineTaskID = uuid.NewString() }, "workflow": func(b *hatchet.Assignment) { b.WorkflowID = uuid.NewString() }, "version": func(b *hatchet.Assignment) { b.VersionID = uuid.NewString() }, "step": func(b *hatchet.Assignment) { b.TaskName += "-wrong" }, "action": func(b *hatchet.Assignment) { b.ActionID += "-wrong" }, "worker": func(b *hatchet.Assignment) { b.WorkerName = "multica-" + uuid.NewString() }, "retry": func(b *hatchet.Assignment) { b.Retry++ }, "invocation": func(b *hatchet.Assignment) { b.Invocation++ },
+		} {
+			wrong := binding
+			mutate(&wrong)
+			if err := assignments.VerifyAssignment(actionCtx, wrong); !errors.Is(err, hatchet.ErrAssignmentDenied) {
+				t.Errorf("%s selector accepted/unavailable: %v run=%s task=%s", name, err, request.EngineRunID, request.EngineTaskID)
+			}
+		}
+		if binding.Retry > 0 {
+			old := binding
+			old.Retry--
+			if err := assignments.VerifyAssignment(actionCtx, old); !errors.Is(err, hatchet.ErrAssignmentDenied) {
+				t.Errorf("old retry accepted: %v", err)
+			}
+		}
+		if binding.Invocation > 1 {
+			old := binding
+			old.Invocation--
+			if err := assignments.VerifyAssignment(actionCtx, old); !errors.Is(err, hatchet.ErrAssignmentDenied) {
+				t.Errorf("old invocation accepted: %v", err)
+			}
+		}
+		if signal, ok := preACKActions.Load(uuidToString(a.Run.ID)); ok {
+			var location string
+			var size int
+			var insertedAt time.Time
+			if err := enginePool.QueryRow(actionCtx, `SELECT p.location::text,octet_length(p.inline_content::text) FROM v1_lookup_table k JOIN v1_payload p ON (p.id,p.inserted_at)=(k.task_id,k.inserted_at) AND p.tenant_id=k.tenant_id WHERE k.tenant_id=$1 AND k.external_id=$2 AND p.type='TASK_INPUT'`, a.Runner.TenantID, request.EngineTaskID).Scan(&location, &size); err != nil || location != "INLINE" {
+				t.Errorf("pre-ACK actual input unavailable: %s %v", location, err)
+			}
+			if err := enginePool.QueryRow(actionCtx, `SELECT t.inserted_at FROM v1_lookup_table k JOIN v1_task t ON (t.id,t.inserted_at)=(k.task_id,k.inserted_at) AND t.tenant_id=k.tenant_id WHERE k.tenant_id=$1 AND k.external_id=$2`, a.Runner.TenantID, request.EngineTaskID).Scan(&insertedAt); err != nil {
+				t.Error(err)
+			}
+			preACK := binding
+			preACK.LocalRunID = uuidToString(a.Run.ID)
+			preACK.SubmissionStartedAt = a.Run.SubmissionStartedAt.Time
+			preACK.SubmissionDeadline = a.Run.SubmissionDeadline.Time
+			if err := assignments.VerifyAssignment(actionCtx, preACK); err != nil {
+				t.Errorf("actual inline input binding failed: %v", err)
+			}
+			wrongInput := preACK
+			wrongInput.LocalRunID = uuid.NewString()
+			if err := assignments.VerifyAssignment(actionCtx, wrongInput); !errors.Is(err, hatchet.ErrAssignmentInputPending) {
+				t.Errorf("unmatched reserved input accepted: %v", err)
+			}
+			lateStart := preACK
+			lateStart.SubmissionStartedAt = insertedAt.Add(time.Microsecond)
+			if err := assignments.VerifyAssignment(actionCtx, lateStart); !errors.Is(err, hatchet.ErrAssignmentInputPending) {
+				t.Errorf("task timestamp before first submission accepted: %v inserted=%s", err, insertedAt.Format(time.RFC3339Nano))
+			}
+			t.Logf("pre-ACK action bound engine=%s task=%s input=%s bytes=%d", request.EngineRunID, request.EngineTaskID, location, size)
+			t.Logf("first-bind timestamp started=%s taskInserted=%s deadline=%s", preACK.SubmissionStartedAt.Format(time.RFC3339Nano), insertedAt.Format(time.RFC3339Nano), preACK.SubmissionDeadline.Format(time.RFC3339Nano))
+			close(signal.(chan struct{}))
+			preACKActions.Delete(uuidToString(a.Run.ID))
+		}
 		if payload.ID == "hold" {
 			entered <- uuidToString(a.Runner.ID)
 			select {
@@ -379,7 +604,7 @@ func TestWorkflowGoPackagedControlLive(t *testing.T) {
 		}
 		if payload.ID == "after" {
 			t.Logf("SDK after action run=%s generation=%s", uuidToString(a.Run.ID), uuidToString(a.Runner.ID))
-			after <- actionObservation{uuidToString(a.Runner.ID), uuidToString(a.Run.ID)}
+			after <- actionObservation{uuidToString(a.Runner.ID), uuidToString(a.Run.ID), request}
 		}
 		return json.RawMessage(`{"ok":true}`), nil
 	}
@@ -416,6 +641,14 @@ func TestWorkflowGoPackagedControlLive(t *testing.T) {
 		t.Fatalf("R1 durable sleep was not acknowledged evicted before transition: %s", evictionLast)
 	}
 	t.Log("R1 durable sleep acknowledged evicted before manager switch")
+	registration := generation.ready.Registrations[0]
+	evictedBinding := hatchet.Assignment{TenantID: serverCred.TenantID, EngineRunID: uuidToString(sleepRun.HatchetRunID), WorkflowID: registration.EngineWorkflowID, VersionID: registration.EngineVersionID, TaskName: registration.Actions[0].TaskName, ActionID: registration.Actions[0].ActionID, WorkerName: "multica-" + oldGeneration}
+	if err := enginePool.QueryRow(ctx, `SELECT t.external_id::text,t.retry_count,lf.latest_invocation_count FROM v1_task t JOIN v1_durable_event_log_file lf ON (lf.durable_task_id,lf.durable_task_inserted_at)=(t.id,t.inserted_at) AND lf.tenant_id=t.tenant_id WHERE t.tenant_id=$1 AND t.workflow_run_id=$2 AND t.step_readable_id=$3`, serverCred.TenantID, evictedBinding.EngineRunID, evictedBinding.TaskName).Scan(&evictedBinding.EngineTaskID, &evictedBinding.Retry, &evictedBinding.Invocation); err != nil {
+		t.Fatal(err)
+	}
+	if err := assignments.VerifyAssignment(ctx, evictedBinding); !errors.Is(err, hatchet.ErrAssignmentDenied) {
+		t.Fatalf("evicted runtime accepted: %v %+v", err, evictedBinding)
+	}
 	oldRun, e := h.WorkflowSvc.AdmitRun(ctx, workflow, actor, "manual", pgtype.UUID{}, json.RawMessage(`{"hold":true}`))
 	if e != nil {
 		t.Fatal(e)
@@ -474,6 +707,24 @@ func TestWorkflowGoPackagedControlLive(t *testing.T) {
 	generation.started = started
 	if generation.ready.Generation != ready.Generation || generation.retiring == nil {
 		t.Fatal("routine refresh bypassed retiring pair backpressure")
+	}
+	// The pinned stop unregisters before awaiting futures. Wait for that actual
+	// scheduling state so this proves the retiring hot call after unregister.
+	unregistered := false
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
+		var paused, inactive, deleted bool
+		if err := enginePool.QueryRow(ctx, `SELECT "isPaused",NOT "isActive","deletedAt" IS NOT NULL FROM "Worker" WHERE "tenantId"=$1 AND name=$2`, serverCred.TenantID, "multica-"+oldGeneration).Scan(&paused, &inactive, &deleted); err != nil {
+			t.Fatal(err)
+		}
+		if inactive {
+			t.Logf("retiring worker paused=%t inactive=%t deleted=%t before hot action", paused, inactive, deleted)
+			unregistered = true
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !unregistered {
+		t.Fatal("retiring hot call fixture did not observe unregister")
 	}
 	close(release)
 	select {
@@ -567,10 +818,62 @@ func TestWorkflowGoPackagedControlLive(t *testing.T) {
 	if !observedSleep {
 		t.Fatalf("sleeping R1 SDK action not observed: remaining=%+v expected run=%s generation=%s newRun=%s", remaining, uuidToString(sleepRun.ID), ready.Generation, uuidToString(newRun.ID))
 	}
+	resumedValue, ok := observedAssignments.Load(uuidToString(sleepRun.ID))
+	if !ok {
+		t.Fatal("missing resumed assignment")
+	}
+	resumed := resumedValue.(hatchet.Assignment)
+	if resumed.EngineTaskID != evictedBinding.EngineTaskID || resumed.Invocation <= evictedBinding.Invocation || resumed.WorkerName == evictedBinding.WorkerName {
+		t.Fatalf("no actual durable reassignment: old=%+v resumed=%+v", evictedBinding, resumed)
+	}
+	if err := assignments.VerifyAssignment(ctx, evictedBinding); !errors.Is(err, hatchet.ErrAssignmentDenied) {
+		t.Fatalf("stale reassigned tuple accepted: %v", err)
+	}
+	t.Logf("evicted/reassigned tuple denied task=%s oldInvocation=%d resumedInvocation=%d", resumed.EngineTaskID, evictedBinding.Invocation, resumed.Invocation)
 	manager.reconcile(ctx, watched)
 	if generation.retiring != nil || !engineRevoked(oldGeneration) || engineRevoked(ready.Generation) {
 		t.Fatal("completed retiring engine credential not targeted independently of healthy current")
 	}
+	// Explicitly force the first SDK call to win the local ACK race, once with
+	// successful response and once with accepted-response loss at maximum input.
+	for _, lost := range []bool{false, true} {
+		h.WorkflowSvc.Engine = nil
+		input := json.RawMessage(`{}`)
+		if lost {
+			input = json.RawMessage(`{"pad":"` + strings.Repeat("x", (64<<10)-10) + `"}`)
+			if len(input) != 64<<10 {
+				t.Fatal("maximum payload fixture size", len(input))
+			}
+		}
+		pending, err := h.WorkflowSvc.AdmitRun(ctx, workflow, actor, "manual", pgtype.UUID{}, input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		signal := make(chan struct{})
+		preACKActions.Store(uuidToString(pending.ID), signal)
+		ambiguous := &workflowLivePreACKEngine{workflowLiveEngine: workflowLiveEngine{engine, serverCred}, action: signal, lost: lost}
+		h.WorkflowSvc.Engine = ambiguous
+		if _, err = h.WorkflowSvc.SubmitRun(ctx, service.RunIntent{WorkspaceID: ws, RunID: pending.ID}); err != nil {
+			t.Fatal(err)
+		}
+		bound, err := queries.GetWorkflowRunInWorkspace(ctx, db.GetWorkflowRunInWorkspaceParams{ID: pending.ID, WorkspaceID: ws})
+		if err != nil || !bound.HatchetRunID.Valid || bound.Status != "running" {
+			t.Fatalf("first SDK action failed to bind before ACK lost=%t row=%+v err=%v", lost, bound, err)
+		}
+		if _, err = h.WorkflowSvc.SubmitRun(ctx, service.RunIntent{WorkspaceID: ws, RunID: pending.ID}); err != nil || ambiguous.submits.Load() != 1 {
+			t.Fatalf("accepted first action caused second Submit lost=%t submits=%d err=%v", lost, ambiguous.submits.Load(), err)
+		}
+		for _, id := range []pgtype.UUID{bound.HatchetRunID, parseUUID(uuid.NewString())} {
+			_, _ = queries.AcknowledgeWorkflowRun(ctx, db.AcknowledgeWorkflowRunParams{ID: pending.ID, WorkspaceID: ws, HatchetRunID: id})
+			_, _ = queries.AcknowledgeWorkflowSubmissionAttempt(ctx, db.AcknowledgeWorkflowSubmissionAttemptParams{ID: pending.ID, WorkspaceID: ws, HatchetRunID: id, SubmissionAttempts: bound.SubmissionAttempts})
+		}
+		current, err := queries.GetWorkflowRunInWorkspace(ctx, db.GetWorkflowRunInWorkspaceParams{ID: pending.ID, WorkspaceID: ws})
+		if err != nil || current.HatchetRunID != bound.HatchetRunID {
+			t.Fatal("late trusted ACK replaced first engine ID", err)
+		}
+		t.Logf("first action before ACK lost=%t run=%s engine=%s submits=%d", lost, uuidToString(pending.ID), uuidToString(bound.HatchetRunID), ambiguous.submits.Load())
+	}
+	h.WorkflowSvc.Engine = workflowLiveEngine{engine, serverCred}
 	if call("GET", "/api/daemon/workflows/revisions", enrollment.Token, "10000000-0000-0000-0000-000000000001", nil, nil) != 401 {
 		t.Fatal("cross workspace accepted")
 	}

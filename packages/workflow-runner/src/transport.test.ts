@@ -2,8 +2,19 @@
 import { createServer } from 'node:http';
 import { createHmac } from 'node:crypto';
 import { afterEach, expect, it } from 'vitest';
-import { createProductTransport, denyEngineREST } from './transport.js';
+import { assignedTransport, createProductTransport, denyEngineREST } from './transport.js';
 const servers: ReturnType<typeof createServer>[] = [];
+it('adds native per-call assignment selectors without changing public operation identity', async () => {
+  const requests: unknown[] = [];
+  let invocationCount = 1;
+  const transport = assignedTransport(async request => { requests.push(request); return null; }, {
+    workflowRunId: () => 'engine-run', taskRunExternalId: () => 'engine-task', get invocationCount() { return invocationCount; },
+  });
+  const request = { protocol: 1 as const, run_id: 'local', step_id: 'step', attempt: 2, operation: 'issues.create' as const, operation_key: 'stable-key', payload: {} };
+  await transport(request); invocationCount = 3; await transport(request);
+  expect(requests).toEqual([1, 3].map(count => ({ ...request, engine_run_id: 'engine-run', engine_task_id: 'engine-task', invocation_count: count })));
+  expect(request).not.toHaveProperty('engine_run_id');
+});
 afterEach(async () => { await Promise.all(servers.splice(0).map(s => new Promise<void>(r => s.close(() => r())))); });
 it('signs exact run-bound requests and maps conflict without upstream data', async () => {
   const bodies: string[] = [];

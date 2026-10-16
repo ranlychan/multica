@@ -33,6 +33,14 @@ JOIN member m ON m.workspace_id=d.workspace_id AND m.user_id=d.owner_id
 JOIN workflow_hatchet_tenant ht ON ht.workspace_id=t.workspace_id AND ht.tenant_id=t.tenant_id AND ht.deletion_state='active'
 WHERE t.token_hash=$1 AND t.workspace_id=$2 AND t.id=$3 AND t.revoked_at IS NULL AND t.expires_at>now()
 AND d.capable AND d.control_expires_at>now();
+-- name: LockWorkflowRunnerAuthorization :one
+SELECT t.* FROM workflow_runner_token t
+JOIN workflow_daemon d ON d.workspace_id=t.workspace_id AND d.daemon_id=t.daemon_id AND d.control_hash=t.control_hash
+JOIN member m ON m.workspace_id=d.workspace_id AND m.user_id=d.owner_id
+JOIN workflow_hatchet_tenant ht ON ht.workspace_id=t.workspace_id AND ht.tenant_id=t.tenant_id AND ht.deletion_state='active'
+WHERE t.token_hash=$1 AND t.workspace_id=$2 AND t.id=$3 AND t.revoked_at IS NULL AND t.expires_at>now()
+AND d.capable AND d.control_expires_at>now() AND t.lease_until>now()
+FOR UPDATE OF d,t FOR SHARE OF m,ht;
 -- name: GetWorkflowRunnerGeneration :one
 SELECT * FROM workflow_runner_token WHERE workspace_id=$1 AND daemon_id=$2 AND id=$3 AND control_hash=$4 AND revoked_at IS NULL AND expires_at>now();
 -- name: LeaseWorkflowRunnerGeneration :execrows

@@ -39,6 +39,42 @@ The exact upstream service name for durable dispatch is recorded in
 `testdata/contract.json`; downstream code should use the pinned SDK rather than
 hand-constructing the bidirectional durable protocol.
 
+## Server assignment verification
+
+Product SDK actions additionally require the pinned operational database adapter
+in `assignment.go`. It uses the existing server-only dedicated Hatchet DB URL in a
+separate lazy pool, read-only sessions and transactions, a primary check and a
+schema-shape check. An engine upgrade must revalidate this SQL and payload contract
+as well as the binary receipts; schema matching alone does not prove a binary pin.
+The existing database role is not claimed to be a least-privilege read-only role.
+
+Private SDK selectors identify the engine run/task, native retry and durable
+invocation. The server cross-checks the current task/runtime/invocation and actual
+assigned generation worker against its checked immutable registration. Paused,
+inactive or old heartbeat scheduling flags do not by themselves revoke running
+work. Missing, evicted, reassigned or expired runtime evidence fails closed.
+
+Before a local Submit ACK, actual INLINE TASK_INPUT may prove the reserved local
+run UUID within its original 55-minute first-submission window. A fresh application
+transaction rechecks authority before binding the engine ID once. Already-bound
+steps use permanent ID equality without that first-binding timestamp restriction.
+Missing/offloaded input cannot prove this linkage. The owned supervisor disables
+external payload storage and the live test covers the maximum 64KiB input; changing
+payload storage requires new coverage or bounded trusted-ACK recovery. This read is
+a snapshot, not a cross-database lease through a later business commit.
+
+Routine retirement continues the typed Dispatcher Heartbeat RPC only while public
+SDK stop waits for active futures. The pin writes a heartbeat before returning
+FAILED_PRECONDITION9 for an inactive listener; new scheduling requires isActive.
+The helper uses single-flight4second retries/5second call aborts and ends with
+draining or the daemon-owned original credential deadline. It uses the exported
+dispatcher getter (annotated @internal), an explicit exact-pin coupling requiring
+upgrade revalidation, without reflecting into private worker fields. Network
+failures can still cause reassignment; strict action verification rejects the old
+invocation. Previously selected undelivered work may recover after retirement
+heartbeats cease. No server-side heartbeat extends a dead daemon's lifetime, and
+the worker REST adapter remains denied.
+
 ## Required adapter decisions and remaining gates
 
 1. **Immutable revisions:** triggering by name selects the newest registered

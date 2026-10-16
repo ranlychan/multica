@@ -6,8 +6,10 @@ import type { ClientConfig } from '@hatchet-dev/typescript-sdk/clients/hatchet-c
 import { createWorkflowContext, validateJSON, redactJSON, safeWorkflowErrorCode, WorkflowError, type JSONValue, type WorkflowDefinition } from '@multica/workflow-sdk';
 import { loadDefinition } from './load.js';
 import { graphDigest, sourceHash } from './validate.js';
-import { createProductTransport, denyEngineREST, validateProductOrigin } from './transport.js';
+import { assignedTransport, createProductTransport, denyEngineREST, validateProductOrigin } from './transport.js';
 import { RUNNER_VERSION, type WorkerDescriptor, type RevisionDescriptor, type RegistrationEvidence, type ChildMessage } from './contracts.js';
+import { retireWithHeartbeat } from './retirement.js';
+import { captureWorkerRegistration } from './registration.js';
 
 export function actionNames(name: string, step: string) {
   const task_name = `${name}-step-${createHash('sha256').update(step).digest('hex').slice(0, 16)}`;
@@ -49,6 +51,7 @@ export async function startWorker(descriptor: WorkerDescriptor, send: (message: 
     cancellation_grace_period: 1, cancellation_warning_threshold: 1, grpc_max_recv_message_length: 4 << 20, grpc_max_send_message_length: 4 << 20,
   };
   const registrations = new Map<string, RegistrationEvidence>();
+  let registeredWorkerID: string | undefined;
   const base = createNodeTransport(config);
   const transport: Transport = { ...base, unary: async (...args) => {
     const [method, , , , input] = args;
@@ -73,6 +76,7 @@ export async function startWorker(descriptor: WorkerDescriptor, send: (message: 
     return response;
   } };
   const client = Hatchet.init(config, { transport }, { adapter: denyEngineREST });
+  captureWorkerRegistration(client.dispatcher.client, descriptor.tenant_id, `multica-${descriptor.generation}`, id => { registeredWorkerID = id; });
   const product = createProductTransport(descriptor.product, descriptor.workspace_id, descriptor.generation);
   const workflows = definitions.map(({ revision, definition }) => {
     const workflow = CreateWorkflow<{ multica_run_id: string; input: JSONValue }, Record<string, { value: JSONValue }>>({ name: revision.engine_workflow_name, idempotency: { strategy: 'ttl', expression: 'input.multica_run_id', ttlMs: 3600000 } });
@@ -89,7 +93,7 @@ export async function startWorker(descriptor: WorkerDescriptor, send: (message: 
             const output = await engineContext.parentOutput<{ value: JSONValue }>(tasks.get(parent)!);
             parentValues[parent] = validateJSON(output.value);
           }
-          const context = createWorkflowContext({ runId: envelope.multica_run_id, stepId: id, attempt: engineContext.retryCount(), input: envelope.input, parents: parentValues, transport: product, sleep: async ms => { await engineContext.sleepFor({ seconds: ms / 1000 }); }, log: async entry => {
+          const context = createWorkflowContext({ runId: envelope.multica_run_id, stepId: id, attempt: engineContext.retryCount(), input: envelope.input, parents: parentValues, transport: assignedTransport(product, engineContext), sleep: async ms => { await engineContext.sleepFor({ seconds: ms / 1000 }); }, log: async entry => {
             // Upstream silently drops >1000-character logs; keep a valid bounded record.
             const text = JSON.stringify(entry);
             await engineContext.log(text.length <= 950 ? text : JSON.stringify({ level: entry.level, message: entry.message.slice(0, 500), truncated: true }));
@@ -127,7 +131,11 @@ export async function startWorker(descriptor: WorkerDescriptor, send: (message: 
   return { activate, retire: async () => {
     // Routine replacement waits for active work/acknowledged durable eviction.
     // The Go owner separately bounds this by the original credential deadline.
-    await worker.stop();
+    if (!registeredWorkerID) throw new WorkflowError('workflow_registration_mismatch');
+    const workerId = registeredWorkerID;
+    // Exported typed dispatcher RPC (@internal in this SDK pin), no private
+    // worker fields. Heartbeat updates existing work even after unregister.
+    await retireWithHeartbeat(() => worker.stop(), signal => client.dispatcher.client.heartbeat({ workerId, heartbeatAt: new Date() }, { signal }));
     send({ type: 'drained', generation: descriptor.generation });
   }, drain: async () => {
     let timer: ReturnType<typeof setTimeout> | undefined;

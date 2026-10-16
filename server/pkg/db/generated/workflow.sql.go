@@ -333,6 +333,67 @@ func (q *Queries) BeginWorkflowRunSubmission(ctx context.Context, arg BeginWorkf
 	return i, err
 }
 
+const bindWorkflowActionEngineRun = `-- name: BindWorkflowActionEngineRun :one
+UPDATE workflow_run SET status='running',hatchet_run_id=$3,started_at=now()
+WHERE id=$1 AND workspace_id=$2 AND status='submitting' AND hatchet_run_id IS NULL
+AND cancel_requested_at IS NULL AND submission_attempts>0
+AND submission_started_at IS NOT NULL AND submission_deadline>now()
+AND submission_deadline <= submission_started_at + interval '55 minutes'
+RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at, pending_terminal_status, pending_terminal_output, final_projection_attempts
+`
+
+type BindWorkflowActionEngineRunParams struct {
+	ID           pgtype.UUID `json:"id"`
+	WorkspaceID  pgtype.UUID `json:"workspace_id"`
+	HatchetRunID pgtype.UUID `json:"hatchet_run_id"`
+}
+
+func (q *Queries) BindWorkflowActionEngineRun(ctx context.Context, arg BindWorkflowActionEngineRunParams) (WorkflowRun, error) {
+	row := q.db.QueryRow(ctx, bindWorkflowActionEngineRun, arg.ID, arg.WorkspaceID, arg.HatchetRunID)
+	var i WorkflowRun
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.WorkflowID,
+		&i.RevisionID,
+		&i.DefinitionHash,
+		&i.PrincipalUserID,
+		&i.TriggerID,
+		&i.Source,
+		&i.Status,
+		&i.PlannedAt,
+		&i.IdempotencyKey,
+		&i.SubmissionStartedAt,
+		&i.SubmissionDeadline,
+		&i.HatchetRunID,
+		&i.Input,
+		&i.Output,
+		&i.IssueID,
+		&i.TaskID,
+		&i.OriginatorUserID,
+		&i.AccountableUserID,
+		&i.OriginatorSource,
+		&i.ReasonCode,
+		&i.FailureReason,
+		&i.TriggeredAt,
+		&i.StartedAt,
+		&i.FinishedAt,
+		&i.DurationMs,
+		&i.CreatedAt,
+		&i.CancelRequestedAt,
+		&i.CancelRequestedByID,
+		&i.SubmissionAttempts,
+		&i.SubmissionLeaseUntil,
+		&i.LogProjection,
+		&i.StepProjection,
+		&i.LastReconciledAt,
+		&i.PendingTerminalStatus,
+		&i.PendingTerminalOutput,
+		&i.FinalProjectionAttempts,
+	)
+	return i, err
+}
+
 const cancelUnsubmittedWorkflowRun = `-- name: CancelUnsubmittedWorkflowRun :one
 UPDATE workflow_run SET status='cancelled',finished_at=now()
 WHERE id=$1 AND workspace_id=$2 AND status='queued' AND submission_started_at IS NULL AND cancel_requested_at IS NOT NULL RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at, pending_terminal_status, pending_terminal_output, final_projection_attempts
@@ -2254,6 +2315,83 @@ func (q *Queries) LockDueWorkflowTriggers(ctx context.Context, arg LockDueWorkfl
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockWorkflowActionMembership = `-- name: LockWorkflowActionMembership :one
+SELECT id, workspace_id, user_id, role, created_at FROM member WHERE workspace_id=$1 AND user_id=$2 FOR SHARE
+`
+
+type LockWorkflowActionMembershipParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	UserID      pgtype.UUID `json:"user_id"`
+}
+
+func (q *Queries) LockWorkflowActionMembership(ctx context.Context, arg LockWorkflowActionMembershipParams) (Member, error) {
+	row := q.db.QueryRow(ctx, lockWorkflowActionMembership, arg.WorkspaceID, arg.UserID)
+	var i Member
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.UserID,
+		&i.Role,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const lockWorkflowActionRun = `-- name: LockWorkflowActionRun :one
+SELECT id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at, pending_terminal_status, pending_terminal_output, final_projection_attempts FROM workflow_run WHERE id=$1 AND workspace_id=$2 FOR UPDATE
+`
+
+type LockWorkflowActionRunParams struct {
+	ID          pgtype.UUID `json:"id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) LockWorkflowActionRun(ctx context.Context, arg LockWorkflowActionRunParams) (WorkflowRun, error) {
+	row := q.db.QueryRow(ctx, lockWorkflowActionRun, arg.ID, arg.WorkspaceID)
+	var i WorkflowRun
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.WorkflowID,
+		&i.RevisionID,
+		&i.DefinitionHash,
+		&i.PrincipalUserID,
+		&i.TriggerID,
+		&i.Source,
+		&i.Status,
+		&i.PlannedAt,
+		&i.IdempotencyKey,
+		&i.SubmissionStartedAt,
+		&i.SubmissionDeadline,
+		&i.HatchetRunID,
+		&i.Input,
+		&i.Output,
+		&i.IssueID,
+		&i.TaskID,
+		&i.OriginatorUserID,
+		&i.AccountableUserID,
+		&i.OriginatorSource,
+		&i.ReasonCode,
+		&i.FailureReason,
+		&i.TriggeredAt,
+		&i.StartedAt,
+		&i.FinishedAt,
+		&i.DurationMs,
+		&i.CreatedAt,
+		&i.CancelRequestedAt,
+		&i.CancelRequestedByID,
+		&i.SubmissionAttempts,
+		&i.SubmissionLeaseUntil,
+		&i.LogProjection,
+		&i.StepProjection,
+		&i.LastReconciledAt,
+		&i.PendingTerminalStatus,
+		&i.PendingTerminalOutput,
+		&i.FinalProjectionAttempts,
+	)
+	return i, err
 }
 
 const lockWorkflowForUpdate = `-- name: LockWorkflowForUpdate :one

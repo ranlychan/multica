@@ -25,6 +25,11 @@ import (
 )
 
 type workflowBoundaryTenant struct{ tenant string }
+type workflowAssignmentCheck func(context.Context, hatchet.Assignment) error
+
+func (f workflowAssignmentCheck) VerifyAssignment(ctx context.Context, a hatchet.Assignment) error {
+	return f(ctx, a)
+}
 
 func (workflowBoundaryTenant) RevokeWorkerCredentials(context.Context, hatchet.TenantCredentials) error {
 	return nil
@@ -602,7 +607,8 @@ func TestWorkflowActionsBindFrozenPrincipalRevisionAndLiveAuthority(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	dbfx.Exec(t, "UPDATE workflow_run SET status='running',submission_started_at=now(),submission_deadline=now()+interval '55 minutes' WHERE id=$1", run.ID)
+	engineRunID, engineTaskID := uuid.NewString(), uuid.NewString()
+	dbfx.Exec(t, "UPDATE workflow_run SET status='running',hatchet_run_id=$2,submission_started_at=now(),submission_deadline=now()+interval '55 minutes' WHERE id=$1", run.ID, engineRunID)
 	b.h.WorkflowControl.Action = func(_ context.Context, a WorkflowActionAuthority, _ WorkflowActionRequest) (json.RawMessage, error) {
 		if a.Principal != parseUUID(principal) || a.Run.ID != run.ID || a.Revision.ID != b.revisionID {
 			t.Error("caller selected action authority")
@@ -612,7 +618,7 @@ func TestWorkflowActionsBindFrozenPrincipalRevisionAndLiveAuthority(t *testing.T
 	request := func(step string) *http.Request {
 		id := uuidToString(run.ID)
 		path := "/api/workflow-runs/" + id + "/actions"
-		body, _ := json.Marshal(WorkflowActionRequest{Protocol: 1, RunID: id, StepID: step, Operation: "issues.get", Payload: json.RawMessage(`{}`)})
+		body, _ := json.Marshal(WorkflowActionRequest{Protocol: 1, RunID: id, StepID: step, EngineRunID: engineRunID, EngineTaskID: engineTaskID, InvocationCount: 1, Operation: "issues.get", Payload: json.RawMessage(`{}`)})
 		r := withURLParam(newRequest("POST", path, nil), "id", id)
 		r.Body = io.NopCloser(strings.NewReader(string(body)))
 		r.Header.Set("Authorization", "Bearer "+b.cred.RunnerToken)
@@ -624,7 +630,24 @@ func TestWorkflowActionsBindFrozenPrincipalRevisionAndLiveAuthority(t *testing.T
 		r.Header.Set("X-Multica-Workflow-Signature", hex.EncodeToString(mac.Sum(nil)))
 		return r
 	}
+	// A valid product signature/lease is insufficient without independent engine assignment.
+	testutil.Call(t, b.h.WorkflowRunnerAction, request("a")).Want(503)
+	b.h.WorkflowControl.Assignments = workflowAssignmentCheck(func(_ context.Context, a hatchet.Assignment) error { return errors.New("assignment unavailable") })
+	testutil.Call(t, b.h.WorkflowRunnerAction, request("a")).Want(503)
+	b.h.WorkflowControl.Assignments = workflowAssignmentCheck(func(_ context.Context, a hatchet.Assignment) error { return hatchet.ErrAssignmentDenied })
+	testutil.Call(t, b.h.WorkflowRunnerAction, request("a")).Want(403)
+	checked := false
+	b.h.WorkflowControl.Assignments = workflowAssignmentCheck(func(_ context.Context, a hatchet.Assignment) error {
+		if a.TenantID != b.cred.TenantID || a.EngineRunID != engineRunID || a.EngineTaskID != engineTaskID || a.VersionID != b.ready.Registrations[0].EngineVersionID || a.WorkflowID != b.ready.Registrations[0].EngineWorkflowID || a.TaskName != b.ready.Registrations[0].Actions[0].TaskName || a.ActionID != b.ready.Registrations[0].Actions[0].ActionID || a.WorkerName != "multica-"+b.cred.Generation || a.Invocation != 1 || a.Retry != 0 || a.LocalRunID != "" {
+			t.Fatalf("wrong independently checked assignment: %+v", a)
+		}
+		checked = true
+		return nil
+	})
 	testutil.Call(t, b.h.WorkflowRunnerAction, request("a")).Want(200)
+	if !checked {
+		t.Fatal("action bypassed engine assignment")
+	}
 	testutil.Call(t, b.h.WorkflowRunnerAction, request("forged")).Want(403)
 	bad := request("a")
 	bad.Header.Set("X-Multica-Workflow-Signature", strings.Repeat("0", 64))

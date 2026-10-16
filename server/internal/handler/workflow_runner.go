@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"reflect"
 	"strconv"
@@ -35,23 +36,30 @@ type WorkflowTenantProvider interface {
 type WorkflowRegistrationVerifier interface {
 	VerifyRegistration(context.Context, hatchet.TenantCredentials, wr.Registration) error
 }
+type WorkflowAssignmentVerifier interface {
+	VerifyAssignment(context.Context, hatchet.Assignment) error
+}
 
 // WorkflowControl never executes authored source. Its engine client is private/server-only.
 type WorkflowControl struct {
-	Ready    func() bool
-	Tenants  WorkflowTenantProvider
-	Verifier WorkflowRegistrationVerifier
+	Ready       func() bool
+	Tenants     WorkflowTenantProvider
+	Verifier    WorkflowRegistrationVerifier
+	Assignments WorkflowAssignmentVerifier
 	// Task6 supplies business operations; authentication stays in this handler.
 	Action func(context.Context, WorkflowActionAuthority, WorkflowActionRequest) (json.RawMessage, error)
 }
 type WorkflowActionRequest struct {
-	Protocol     int             `json:"protocol"`
-	RunID        string          `json:"run_id"`
-	StepID       string          `json:"step_id"`
-	Attempt      int             `json:"attempt"`
-	Operation    string          `json:"operation"`
-	OperationKey string          `json:"operation_key,omitempty"`
-	Payload      json.RawMessage `json:"payload"`
+	Protocol        int             `json:"protocol"`
+	RunID           string          `json:"run_id"`
+	StepID          string          `json:"step_id"`
+	Attempt         int             `json:"attempt"`
+	Operation       string          `json:"operation"`
+	OperationKey    string          `json:"operation_key,omitempty"`
+	Payload         json.RawMessage `json:"payload"`
+	EngineRunID     string          `json:"engine_run_id"`
+	EngineTaskID    string          `json:"engine_task_id"`
+	InvocationCount int             `json:"invocation_count"`
 }
 type WorkflowActionAuthority struct {
 	Run       db.WorkflowRun
@@ -654,14 +662,120 @@ func (h *Handler) WorkflowRunnerAction(w http.ResponseWriter, r *http.Request) {
 		workflowDenied(w, 403, "workflow_forbidden")
 		return
 	}
-	if h.WorkflowControl.Action == nil {
+	if h.WorkflowControl.Assignments == nil || h.WorkflowControl.Action == nil {
 		workflowDenied(w, 503, "workflow_unavailable")
 		return
 	}
-	result, e := h.WorkflowControl.Action(r.Context(), WorkflowActionAuthority{Run: run, Revision: rev, Runner: token, Principal: run.PrincipalUserID}, req)
+	if req.Attempt > math.MaxInt32 || req.InvocationCount < 1 || req.InvocationCount > math.MaxInt32 || len(req.StepID) > 128 {
+		workflowDenied(w, 403, "workflow_forbidden")
+		return
+	}
+	engineID, idErr := util.ParseUUID(req.EngineRunID)
+	_, taskErr := util.ParseUUID(req.EngineTaskID)
+	if idErr != nil || taskErr != nil || (run.HatchetRunID.Valid && run.HatchetRunID != engineID) {
+		workflowDenied(w, 403, "workflow_forbidden")
+		return
+	}
+	if h.WorkflowControl.Tenants == nil {
+		workflowDenied(w, 503, "workflow_unavailable")
+		return
+	}
+	cred, e := h.WorkflowControl.Tenants.MappedCredentials(r.Context(), ws)
+	if e != nil || cred.TenantID != token.TenantID {
+		workflowDenied(w, 503, "workflow_unavailable")
+		return
+	}
+	assignment := hatchet.Assignment{TenantID: cred.TenantID, EngineRunID: req.EngineRunID, EngineTaskID: req.EngineTaskID, WorkflowID: evidence.EngineWorkflowID, VersionID: evidence.EngineVersionID, WorkerName: "multica-" + uuidToString(token.ID), Retry: req.Attempt, Invocation: req.InvocationCount}
+	for _, action := range evidence.Actions {
+		if action.StepID == req.StepID {
+			assignment.TaskName, assignment.ActionID = action.TaskName, action.ActionID
+		}
+	}
+	if !run.HatchetRunID.Valid {
+		if run.Status != "submitting" || run.SubmissionAttempts < 1 || !run.SubmissionStartedAt.Valid || !run.SubmissionDeadline.Valid || !time.Now().Before(run.SubmissionDeadline.Time) {
+			workflowDenied(w, 503, "workflow_unavailable")
+			return
+		}
+		assignment.LocalRunID, assignment.SubmissionStartedAt, assignment.SubmissionDeadline = req.RunID, run.SubmissionStartedAt.Time, run.SubmissionDeadline.Time
+	}
+	if e = h.WorkflowControl.Assignments.VerifyAssignment(r.Context(), assignment); e != nil {
+		status, code := 503, "workflow_unavailable"
+		if errors.Is(e, hatchet.ErrAssignmentDenied) {
+			status, code = 403, "workflow_forbidden"
+		}
+		workflowDenied(w, status, code)
+		return
+	}
+	// No engine I/O under local locks. The fresh transaction fences local grants
+	// before first binding; Task6b must repeat that fence in its receipt transaction.
+	authority, status, code := h.bindWorkflowAssignment(r.Context(), ws, gen, auth.HashToken(secret), run, evidence, engineID, assignment.LocalRunID != "")
+	if status != 0 {
+		workflowDenied(w, status, code)
+		return
+	}
+	result, e := h.WorkflowControl.Action(r.Context(), authority, req)
 	if e != nil {
 		workflowDenied(w, 409, "workflow_operation_conflict")
 		return
 	}
 	writeJSON(w, 200, map[string]json.RawMessage{"result": result})
+}
+
+func (h *Handler) bindWorkflowAssignment(ctx context.Context, ws, gen pgtype.UUID, tokenHash string, observed db.WorkflowRun, evidence wr.Registration, engineID pgtype.UUID, mayBind bool) (WorkflowActionAuthority, int, string) {
+	deny := func(status int, code string) (WorkflowActionAuthority, int, string) {
+		return WorkflowActionAuthority{}, status, code
+	}
+	tx, err := h.TxStarter.Begin(ctx)
+	if err != nil {
+		return deny(503, "workflow_unavailable")
+	}
+	defer tx.Rollback(ctx)
+	q := h.Queries.WithTx(tx)
+	if _, err = q.LockWorkspaceForChatSessionCreate(ctx, ws); err != nil {
+		return deny(410, "workflow_capability_revoked")
+	}
+	token, err := q.LockWorkflowRunnerAuthorization(ctx, db.LockWorkflowRunnerAuthorizationParams{WorkspaceID: ws, ID: gen, TokenHash: tokenHash})
+	if err != nil {
+		return deny(410, "workflow_capability_revoked")
+	}
+	var registered map[string]wr.Registration
+	if json.Unmarshal(token.Registrations, &registered) != nil || !reflect.DeepEqual(registered[uuidToString(observed.RevisionID)], evidence) {
+		return deny(403, "workflow_forbidden")
+	}
+	workflow, err := q.LockWorkflowForUpdate(ctx, db.LockWorkflowForUpdateParams{ID: observed.WorkflowID, WorkspaceID: ws})
+	if err != nil {
+		return deny(403, "workflow_forbidden")
+	}
+	run, err := q.LockWorkflowActionRun(ctx, db.LockWorkflowActionRunParams{ID: observed.ID, WorkspaceID: ws})
+	if err != nil || run.CancelRequestedAt.Valid || (run.Status != "running" && run.Status != "submitting") || run.RevisionID != observed.RevisionID || run.DefinitionHash != observed.DefinitionHash {
+		return deny(410, "workflow_capability_revoked")
+	}
+	rev, err := q.GetWorkflowRevisionInWorkspace(ctx, db.GetWorkflowRevisionInWorkspaceParams{ID: run.RevisionID, WorkspaceID: ws})
+	if err != nil || rev.DefinitionHash != run.DefinitionHash {
+		return deny(403, "workflow_forbidden")
+	}
+	if _, err = q.LockWorkflowActionMembership(ctx, db.LockWorkflowActionMembershipParams{WorkspaceID: ws, UserID: run.PrincipalUserID}); err != nil {
+		return deny(403, "workflow_forbidden")
+	}
+	svc := *h.WorkflowSvc
+	svc.Queries = q
+	if svc.Authorize(ctx, workflow, service.WorkflowActor{HumanID: run.PrincipalUserID}, false) != nil {
+		return deny(403, "workflow_forbidden")
+	}
+	if !run.HatchetRunID.Valid {
+		if !mayBind {
+			return deny(410, "workflow_capability_revoked")
+		}
+		run, err = q.BindWorkflowActionEngineRun(ctx, db.BindWorkflowActionEngineRunParams{ID: run.ID, WorkspaceID: ws, HatchetRunID: engineID})
+		if err != nil {
+			return deny(410, "workflow_capability_revoked")
+		}
+	}
+	if run.HatchetRunID != engineID {
+		return deny(403, "workflow_forbidden")
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return deny(503, "workflow_unavailable")
+	}
+	return WorkflowActionAuthority{Run: run, Revision: rev, Runner: token, Principal: run.PrincipalUserID}, 0, ""
 }

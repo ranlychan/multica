@@ -686,6 +686,16 @@ func main() {
 	}
 	workflowStartupCtx, stopWorkflowStartup, quit, stopWorkflowSignals := workflowSignals(context.Background())
 	defer stopWorkflowSignals()
+	// Construction is lazy: the owned supervisor has not migrated the engine yet.
+	var workflowAssignments *hatchet.AssignmentVerifier
+	if hatchetConfig.Enabled {
+		workflowAssignments, err = hatchet.NewAssignmentVerifier(workflowStartupCtx, hatchetConfig.DatabaseURL)
+		if err != nil {
+			slog.Error("workflow assignment configuration failed")
+			os.Exit(1)
+		}
+		defer workflowAssignments.Close()
+	}
 	hatchetSupervisor, hatchetTenants, err := startHatchet(workflowStartupCtx, hatchetConfig, pool)
 	stopWorkflowStartup()
 	if err != nil {
@@ -724,7 +734,19 @@ func main() {
 		slog.Error("workflow runtime configuration failed")
 		os.Exit(1)
 	}
-	h.WorkflowControl = &handler.WorkflowControl{Ready: hatchetSupervisor.Ready, Tenants: hatchetTenants}
+	workflowReady := func() bool {
+		if !hatchetSupervisor.Ready() || workflowAssignments == nil {
+			return false
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		return workflowAssignments.Check(ctx) == nil
+	}
+	h.WorkflowSvc.Ready = workflowReady
+	h.WorkflowControl = &handler.WorkflowControl{Ready: workflowReady, Tenants: hatchetTenants}
+	if workflowAssignments != nil {
+		h.WorkflowControl.Assignments = workflowAssignments
+	}
 	if hatchetTenants != nil {
 		controlClient, err := hatchet.NewClient(hatchetConfig.APIURL, nil)
 		if err != nil {

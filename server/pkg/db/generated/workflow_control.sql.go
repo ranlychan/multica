@@ -459,6 +459,48 @@ func (q *Queries) LockWorkflowControl(ctx context.Context, arg LockWorkflowContr
 	return i, err
 }
 
+const lockWorkflowRunnerAuthorization = `-- name: LockWorkflowRunnerAuthorization :one
+SELECT t.id, t.workspace_id, t.daemon_id, t.token_hash, t.label, t.created_by_id, t.last_used_at, t.revoked_at, t.expires_at, t.created_at, t.control_hash, t.tenant_id, t.registrations, t.lease_until, t.phase, t.engine_token_id, t.engine_revoked_at, t.engine_issuance_unknown FROM workflow_runner_token t
+JOIN workflow_daemon d ON d.workspace_id=t.workspace_id AND d.daemon_id=t.daemon_id AND d.control_hash=t.control_hash
+JOIN member m ON m.workspace_id=d.workspace_id AND m.user_id=d.owner_id
+JOIN workflow_hatchet_tenant ht ON ht.workspace_id=t.workspace_id AND ht.tenant_id=t.tenant_id AND ht.deletion_state='active'
+WHERE t.token_hash=$1 AND t.workspace_id=$2 AND t.id=$3 AND t.revoked_at IS NULL AND t.expires_at>now()
+AND d.capable AND d.control_expires_at>now() AND t.lease_until>now()
+FOR UPDATE OF d,t FOR SHARE OF m,ht
+`
+
+type LockWorkflowRunnerAuthorizationParams struct {
+	TokenHash   string      `json:"token_hash"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	ID          pgtype.UUID `json:"id"`
+}
+
+func (q *Queries) LockWorkflowRunnerAuthorization(ctx context.Context, arg LockWorkflowRunnerAuthorizationParams) (WorkflowRunnerToken, error) {
+	row := q.db.QueryRow(ctx, lockWorkflowRunnerAuthorization, arg.TokenHash, arg.WorkspaceID, arg.ID)
+	var i WorkflowRunnerToken
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.DaemonID,
+		&i.TokenHash,
+		&i.Label,
+		&i.CreatedByID,
+		&i.LastUsedAt,
+		&i.RevokedAt,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.ControlHash,
+		&i.TenantID,
+		&i.Registrations,
+		&i.LeaseUntil,
+		&i.Phase,
+		&i.EngineTokenID,
+		&i.EngineRevokedAt,
+		&i.EngineIssuanceUnknown,
+	)
+	return i, err
+}
+
 const promoteWorkflowRunnerCandidate = `-- name: PromoteWorkflowRunnerCandidate :execrows
 UPDATE workflow_runner_token SET phase='current' WHERE workspace_id=$1 AND daemon_id=$2 AND id=$3 AND phase='candidate' AND revoked_at IS NULL AND expires_at>now()
 `
