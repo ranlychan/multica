@@ -8,10 +8,13 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/hatchet"
@@ -19,6 +22,161 @@ import (
 	"github.com/multica-ai/multica/server/internal/testutil"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
+
+type workflowActionTransactionStarted struct {
+	txStarter
+	started chan int32
+}
+
+func (s workflowActionTransactionStarted) Begin(ctx context.Context) (pgx.Tx, error) {
+	tx, err := s.txStarter.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var pid int32
+	if err = tx.QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&pid); err != nil {
+		_ = tx.Rollback(ctx)
+		return nil, err
+	}
+	s.started <- pid
+	return tx, nil
+}
+
+// Catch transaction-start time authorizing an action after a real lock wait.
+// Each lock is held unchanged, so a pre-lock SELECT predicate need not rerun.
+func TestWorkflowAssignmentPostLockWallClockExpiry(t *testing.T) {
+	for _, expiry := range []string{"first_binding", "bound_submission_window", "token", "control", "lease"} {
+		t.Run(expiry, func(t *testing.T) {
+			b := newWorkflowBoundary(t)
+			testutil.Call(t, b.h.WorkflowRunnerAcknowledge, b.request("POST", "ack", b.ready)).Want(200)
+			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			defer cancel()
+			ws := parseUUID(testWorkspaceID)
+			workflow, err := b.h.WorkflowSvc.Load(ctx, ws, b.workflowID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := b.h.WorkflowSvc.AdmitRun(ctx, workflow, service.WorkflowActor{HumanID: parseUUID(testUserID), AuditID: parseUUID(testUserID), AuditType: "member"}, "manual", pgtype.UUID{}, json.RawMessage(`{}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			engineID := uuid.NewString()
+			var expires time.Time
+			if expiry == "first_binding" || expiry == "bound_submission_window" {
+				var boundID any
+				status := "submitting"
+				if expiry == "bound_submission_window" {
+					boundID, status = engineID, "running"
+				}
+				if err = testPool.QueryRow(ctx, `UPDATE workflow_run SET status=$2,hatchet_run_id=$3,submission_attempts=1,submission_started_at=clock_timestamp(),submission_deadline=clock_timestamp()+interval '1500 milliseconds' WHERE id=$1 RETURNING submission_deadline`, run.ID, status, boundID).Scan(&expires); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				dbfx.Exec(t, `UPDATE workflow_run SET status='running',hatchet_run_id=$2,submission_attempts=1,submission_started_at=now(),submission_deadline=now()+interval '55 minutes' WHERE id=$1`, run.ID, engineID)
+				switch expiry {
+				case "token":
+					err = testPool.QueryRow(ctx, `UPDATE workflow_runner_token SET expires_at=clock_timestamp()+interval '1500 milliseconds' WHERE id=$1 RETURNING expires_at`, b.cred.Generation).Scan(&expires)
+				case "control":
+					err = testPool.QueryRow(ctx, `UPDATE workflow_daemon SET control_expires_at=clock_timestamp()+interval '1500 milliseconds' WHERE workspace_id=$1 AND control_hash=$2 RETURNING control_expires_at`, ws, auth.HashToken(b.control)).Scan(&expires)
+				case "lease":
+					err = testPool.QueryRow(ctx, `UPDATE workflow_runner_token SET lease_until=clock_timestamp()+interval '1500 milliseconds' WHERE id=$1 RETURNING lease_until`, b.cred.Generation).Scan(&expires)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			blocker, err := testPool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer blocker.Rollback(context.Background())
+			switch expiry {
+			case "first_binding", "bound_submission_window":
+				_, err = blocker.Exec(ctx, "SELECT id FROM workspace WHERE id=$1 FOR UPDATE", ws)
+			case "token":
+				_, err = blocker.Exec(ctx, "SELECT id FROM workflow_runner_token WHERE id=$1 FOR UPDATE", b.cred.Generation)
+			case "control":
+				_, err = blocker.Exec(ctx, "SELECT daemon_id FROM workflow_daemon WHERE workspace_id=$1 AND control_hash=$2 FOR UPDATE", ws, auth.HashToken(b.control))
+			case "lease":
+				_, err = blocker.Exec(ctx, "SELECT id FROM workflow_run WHERE id=$1 FOR UPDATE", run.ID)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var blockerPID int32
+			if err = blocker.QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&blockerPID); err != nil {
+				t.Fatal(err)
+			}
+			started := make(chan int32, 1)
+			b.h.TxStarter = workflowActionTransactionStarted{txStarter: b.h.TxStarter, started: started}
+			verified, called := false, false
+			b.h.WorkflowControl.Assignments = workflowAssignmentCheck(func(context.Context, hatchet.Assignment) error { verified = true; return nil })
+			b.h.WorkflowControl.Action = func(context.Context, WorkflowActionAuthority, WorkflowActionRequest) (json.RawMessage, error) {
+				called = true
+				return json.RawMessage(`{}`), nil
+			}
+			req := WorkflowActionRequest{Protocol: 1, RunID: uuidToString(run.ID), StepID: "a", EngineRunID: engineID, EngineTaskID: uuid.NewString(), InvocationCount: 1, Operation: "issues.get", Payload: json.RawMessage(`{}`)}
+			request := assignmentRequest(b, req)
+			requestCtx, cancelRequest := context.WithTimeout(request.Context(), 8*time.Second)
+			request = request.WithContext(requestCtx)
+			recorder := httptest.NewRecorder()
+			finished := make(chan struct{})
+			go func() { defer close(finished); b.h.WorkflowRunnerAction(recorder, request) }()
+			defer func() { _ = blocker.Rollback(context.Background()); cancelRequest(); <-finished }()
+			var actionPID int32
+			select {
+			case actionPID = <-started:
+			case <-ctx.Done():
+				t.Fatal("action never reached final transaction", ctx.Err())
+			}
+			blocked := false
+			for !blocked {
+				if err = testPool.QueryRow(ctx, "SELECT $2::integer=ANY(pg_blocking_pids($1::integer))", actionPID, blockerPID).Scan(&blocked); err != nil {
+					t.Fatal(err)
+				}
+				if !blocked {
+					select {
+					case <-finished:
+						t.Fatal("action did not wait on the held application lock")
+					case <-time.After(5 * time.Millisecond):
+					}
+				}
+			}
+			for {
+				var expired bool
+				if err = testPool.QueryRow(ctx, "SELECT clock_timestamp()>$1::timestamptz", expires).Scan(&expired); err != nil {
+					t.Fatal(err)
+				}
+				if expired {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if err = blocker.Rollback(ctx); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-finished:
+			case <-ctx.Done():
+				t.Fatal("action did not finish after unlock", ctx.Err())
+			}
+			current, err := b.h.Queries.GetWorkflowRunInWorkspace(ctx, db.GetWorkflowRunInWorkspaceParams{ID: run.ID, WorkspaceID: ws})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !verified {
+				t.Fatal("fixture never verified assignment before lock wait")
+			}
+			if expiry == "bound_submission_window" {
+				if recorder.Code != 200 || !called || current.HatchetRunID != parseUUID(engineID) {
+					t.Fatalf("bound descendant rejected after submission deadline: status=%d hook=%t", recorder.Code, called)
+				}
+			} else if recorder.Code != 410 || called || (expiry == "first_binding" && current.HatchetRunID.Valid) {
+				t.Fatalf("expired %s authorized after real lock wait: status=%d hook=%t bound=%t", expiry, recorder.Code, called, current.HatchetRunID.Valid)
+			}
+		})
+	}
+}
 
 func TestWorkflowAssignmentFirstBindingRechecksAuthorityBeforeCAS(t *testing.T) {
 	for _, change := range []string{"cancel", "generation", "principal", "control"} {

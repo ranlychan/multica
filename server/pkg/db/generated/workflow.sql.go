@@ -337,7 +337,7 @@ const bindWorkflowActionEngineRun = `-- name: BindWorkflowActionEngineRun :one
 UPDATE workflow_run SET status='running',hatchet_run_id=$3,started_at=now()
 WHERE id=$1 AND workspace_id=$2 AND status='submitting' AND hatchet_run_id IS NULL
 AND cancel_requested_at IS NULL AND submission_attempts>0
-AND submission_started_at IS NOT NULL AND submission_deadline>now()
+AND submission_started_at IS NOT NULL AND submission_deadline>clock_timestamp()
 AND submission_deadline <= submission_started_at + interval '55 minutes'
 RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at, pending_terminal_status, pending_terminal_output, final_projection_attempts
 `

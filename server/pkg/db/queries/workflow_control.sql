@@ -41,6 +41,14 @@ JOIN workflow_hatchet_tenant ht ON ht.workspace_id=t.workspace_id AND ht.tenant_
 WHERE t.token_hash=$1 AND t.workspace_id=$2 AND t.id=$3 AND t.revoked_at IS NULL AND t.expires_at>now()
 AND d.capable AND d.control_expires_at>now() AND t.lease_until>now()
 FOR UPDATE OF d,t FOR SHARE OF m,ht;
+-- name: WorkflowRunnerActionAuthorityFresh :one
+-- Called only after all action authority locks have been acquired. A predicate
+-- in the locking SELECT can be evaluated before its row-lock wait completes.
+SELECT EXISTS(SELECT 1 FROM workflow_runner_token t
+JOIN workflow_daemon d ON d.workspace_id=t.workspace_id AND d.daemon_id=t.daemon_id AND d.control_hash=t.control_hash
+WHERE t.id=$1 AND t.workspace_id=$2 AND t.token_hash=$3
+AND t.expires_at>clock_timestamp() AND t.lease_until>clock_timestamp()
+AND d.control_expires_at>clock_timestamp());
 -- name: GetWorkflowRunnerGeneration :one
 SELECT * FROM workflow_runner_token WHERE workspace_id=$1 AND daemon_id=$2 AND id=$3 AND control_hash=$4 AND revoked_at IS NULL AND expires_at>now();
 -- name: LeaseWorkflowRunnerGeneration :execrows

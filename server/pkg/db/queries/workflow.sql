@@ -159,7 +159,7 @@ WHERE id=$1 AND workspace_id=$2 AND status='submitting' RETURNING *;
 UPDATE workflow_run SET status='running',hatchet_run_id=$3,started_at=now()
 WHERE id=$1 AND workspace_id=$2 AND status='submitting' AND hatchet_run_id IS NULL
 AND cancel_requested_at IS NULL AND submission_attempts>0
-AND submission_started_at IS NOT NULL AND submission_deadline>now()
+AND submission_started_at IS NOT NULL AND submission_deadline>clock_timestamp()
 AND submission_deadline <= submission_started_at + interval '55 minutes'
 RETURNING *;
 -- name: AcknowledgeWorkflowSubmissionAttempt :one

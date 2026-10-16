@@ -774,6 +774,16 @@ func (h *Handler) bindWorkflowAssignment(ctx context.Context, ws, gen pgtype.UUI
 	if run.HatchetRunID != engineID {
 		return deny(403, "workflow_forbidden")
 	}
+	// now() is the transaction start time, and even a wall-clock predicate in
+	// the locking SELECT may run before a lock wait. Check the retained locked
+	// authority after every workspace/generation/workflow/run/member lock.
+	fresh, err := q.WorkflowRunnerActionAuthorityFresh(ctx, db.WorkflowRunnerActionAuthorityFreshParams{ID: gen, WorkspaceID: ws, TokenHash: tokenHash})
+	if err != nil {
+		return deny(503, "workflow_unavailable")
+	}
+	if !fresh {
+		return deny(410, "workflow_capability_revoked")
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return deny(503, "workflow_unavailable")
 	}

@@ -601,6 +601,29 @@ func (q *Queries) SetWorkflowRunnerEngineToken(ctx context.Context, arg SetWorkf
 	return result.RowsAffected(), nil
 }
 
+const workflowRunnerActionAuthorityFresh = `-- name: WorkflowRunnerActionAuthorityFresh :one
+SELECT EXISTS(SELECT 1 FROM workflow_runner_token t
+JOIN workflow_daemon d ON d.workspace_id=t.workspace_id AND d.daemon_id=t.daemon_id AND d.control_hash=t.control_hash
+WHERE t.id=$1 AND t.workspace_id=$2 AND t.token_hash=$3
+AND t.expires_at>clock_timestamp() AND t.lease_until>clock_timestamp()
+AND d.control_expires_at>clock_timestamp())
+`
+
+type WorkflowRunnerActionAuthorityFreshParams struct {
+	ID          pgtype.UUID `json:"id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	TokenHash   string      `json:"token_hash"`
+}
+
+// Called only after all action authority locks have been acquired. A predicate
+// in the locking SELECT can be evaluated before its row-lock wait completes.
+func (q *Queries) WorkflowRunnerActionAuthorityFresh(ctx context.Context, arg WorkflowRunnerActionAuthorityFreshParams) (bool, error) {
+	row := q.db.QueryRow(ctx, workflowRunnerActionAuthorityFresh, arg.ID, arg.WorkspaceID, arg.TokenHash)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const workflowRunnerEligible = `-- name: WorkflowRunnerEligible :one
 SELECT EXISTS(SELECT 1 FROM workflow_runner_token t
 JOIN workflow_daemon d ON d.workspace_id=t.workspace_id AND d.daemon_id=t.daemon_id AND d.control_hash=t.control_hash
