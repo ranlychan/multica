@@ -134,6 +134,28 @@ type tenantWire struct {
 	Slug string `json:"slug"`
 }
 
+// MappedCredentials reads an existing SQL mapping without provisioning or
+// touching the mutable provisioning client/cookie jar. Lease verification must
+// not wait for s.mu, which serializes slow engine mint/revoke/login requests.
+// SQL pool queries and Box support concurrent reads; the mapping is not cached, and the
+// caller must still fence its final product-authority/lease transaction.
+func (s *TenantService) MappedCredentials(ctx context.Context, workspace pgtype.UUID) (TenantCredentials, error) {
+	if !workspace.Valid || s.queries == nil {
+		return TenantCredentials{}, ErrUnavailable
+	}
+	if e := s.workspaceExists(ctx, workspace); e != nil {
+		return TenantCredentials{}, e
+	}
+	row, e := s.queries.GetWorkflowHatchetTenant(ctx, workspace)
+	if errors.Is(e, pgx.ErrNoRows) {
+		return TenantCredentials{}, ErrUnavailable
+	}
+	if e != nil {
+		return TenantCredentials{}, errors.New("hatchet: tenant mapping read failed")
+	}
+	return s.credentials(row)
+}
+
 func (s *TenantService) Ensure(ctx context.Context, workspace pgtype.UUID) (TenantCredentials, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

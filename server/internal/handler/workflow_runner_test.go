@@ -392,6 +392,9 @@ func TestWorkflowFreshControlFencesOldPairAndPermitsSubsequentRotation(t *testin
 func (p workflowBoundaryTenant) Ensure(context.Context, pgtype.UUID) (hatchet.TenantCredentials, error) {
 	return hatchet.TenantCredentials{TenantID: p.tenant, Token: "tenant-server-only"}, nil
 }
+func (p workflowBoundaryTenant) MappedCredentials(ctx context.Context, ws pgtype.UUID) (hatchet.TenantCredentials, error) {
+	return p.Ensure(ctx, ws)
+}
 func (p workflowBoundaryTenant) WorkerCredentials(context.Context, pgtype.UUID, string, string) (hatchet.TenantCredentials, error) {
 	return hatchet.TenantCredentials{TenantID: p.tenant, Token: "tenant-worker-only", TokenID: uuid.NewString(), ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
@@ -482,36 +485,40 @@ func TestWorkflowConflictingAcknowledgementRemainsVisibleWithoutChangingCurrent(
 }
 
 type workflowBoundary struct {
-	h          Handler
-	control    string
-	ready      wr.Message
-	cred       wr.Credentials
-	workflowID pgtype.UUID
-	revisionID pgtype.UUID
+	workspaceID string
+	h           Handler
+	control     string
+	ready       wr.Message
+	cred        wr.Credentials
+	workflowID  pgtype.UUID
+	revisionID  pgtype.UUID
 }
 
 func newWorkflowBoundary(t *testing.T) *workflowBoundary {
+	return newWorkflowBoundaryInWorkspace(t, testWorkspaceID)
+}
+func newWorkflowBoundaryInWorkspace(t *testing.T, workspaceID string) *workflowBoundary {
 	t.Helper()
-	b := &workflowBoundary{h: *testHandler}
+	b := &workflowBoundary{h: *testHandler, workspaceID: workspaceID}
 	b.h.WorkflowSvc = service.NewWorkflowService(b.h.Queries, testPool)
 	b.h.WorkflowSvc.Ready = func() bool { return true }
 	b.h.WorkflowSvc.Eligible = b.h.WorkflowRunnerEligible
 	tenant := uuid.NewString()
-	dbfx.Exec(t, "INSERT INTO workflow_hatchet_tenant(workspace_id,tenant_id,token_encrypted) VALUES($1,$2,'test-only') ON CONFLICT(workspace_id) DO NOTHING", testWorkspaceID, tenant)
-	dbfx.QueryRow(t, "SELECT tenant_id FROM workflow_hatchet_tenant WHERE workspace_id=$1", testWorkspaceID).Scan(&tenant)
+	dbfx.Exec(t, "INSERT INTO workflow_hatchet_tenant(workspace_id,tenant_id,token_encrypted) VALUES($1,$2,'test-only') ON CONFLICT(workspace_id) DO NOTHING", workspaceID, tenant)
+	dbfx.QueryRow(t, "SELECT tenant_id FROM workflow_hatchet_tenant WHERE workspace_id=$1", workspaceID).Scan(&tenant)
 	b.h.WorkflowControl = &WorkflowControl{Ready: func() bool { return true }, Tenants: workflowBoundaryTenant{tenant}, Verifier: workflowBoundaryVerifier{}}
-	dbfx.Cleanup(t, "DELETE FROM workflow_hatchet_tenant WHERE workspace_id=$1", testWorkspaceID)
+	dbfx.Cleanup(t, "DELETE FROM workflow_hatchet_tenant WHERE workspace_id=$1", workspaceID)
 	daemonID := "workflow-boundary-" + uuid.NewString()
-	req := map[string]any{"workspace_id": testWorkspaceID, "daemon_id": daemonID, "workflow_capable": true, "workflow_code_risk_accepted": true, "runner_version": "0.1.0", "node_version": "22.23.3"}
+	req := map[string]any{"workspace_id": workspaceID, "daemon_id": daemonID, "workflow_capable": true, "workflow_code_risk_accepted": true, "runner_version": "0.1.0", "node_version": "22.23.3"}
 	var enrollment struct {
 		Token string `json:"workflow_control_token"`
 	}
 	testutil.Call(t, b.h.DaemonRegister, newRequest("POST", "/api/daemon/register", req)).Want(200).JSON(&enrollment)
 	b.control = enrollment.Token
-	dbfx.Cleanup(t, "DELETE FROM workflow_daemon WHERE workspace_id=$1 AND daemon_id=$2", testWorkspaceID, daemonID)
-	dbfx.Cleanup(t, "DELETE FROM workflow_runner_token WHERE workspace_id=$1 AND daemon_id=$2", testWorkspaceID, daemonID)
+	dbfx.Cleanup(t, "DELETE FROM workflow_daemon WHERE workspace_id=$1 AND daemon_id=$2", workspaceID, daemonID)
+	dbfx.Cleanup(t, "DELETE FROM workflow_runner_token WHERE workspace_id=$1 AND daemon_id=$2", workspaceID, daemonID)
 	actor := service.WorkflowActor{HumanID: parseUUID(testUserID), AuditID: parseUUID(testUserID), AuditType: "member"}
-	w, err := b.h.WorkflowSvc.Create(context.Background(), parseUUID(testWorkspaceID), actor, "boundary", "boundary-"+uuid.NewString(), "")
+	w, err := b.h.WorkflowSvc.Create(context.Background(), parseUUID(workspaceID), actor, "boundary", "boundary-"+uuid.NewString(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -519,20 +526,20 @@ func newWorkflowBoundary(t *testing.T) *workflowBoundary {
 	dbfx.Cleanup(t, "DELETE FROM workflow WHERE id=$1", w.ID)
 	dbfx.Cleanup(t, "DELETE FROM workflow_revision WHERE workflow_id=$1", w.ID)
 	dbfx.Cleanup(t, "DELETE FROM workflow_run WHERE workflow_id=$1", w.ID)
-	pub, err := b.h.WorkflowSvc.PublishRevision(context.Background(), parseUUID(testWorkspaceID), w.ID, actor, 0, "test-only-source", json.RawMessage(`{"steps":[{"id":"a","parents":[]}]}`))
+	pub, err := b.h.WorkflowSvc.PublishRevision(context.Background(), parseUUID(workspaceID), w.ID, actor, 0, "test-only-source", json.RawMessage(`{"steps":[{"id":"a","parents":[]}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	b.revisionID = pub.Revision.ID
 	testutil.Call(t, b.h.WorkflowRunnerRotate, b.request("POST", "rotate", nil)).Want(200).JSON(&b.cred)
 	action := service.WorkflowActionName(pub.Revision, "a")
-	b.ready = wr.Message{Type: "ready", Protocol: 1, WorkspaceID: testWorkspaceID, TenantID: tenant, Generation: b.cred.Generation, RunnerVersion: "0.1.0", NodeVersion: "22.23.3", Registrations: []wr.Registration{{Revision: wireRevision(pub.Revision), EngineWorkflowID: "20000000-0000-0000-0000-000000000002", EngineVersionID: "30000000-0000-0000-0000-000000000003", Actions: []wr.Action{{StepID: "a", TaskName: action, ActionID: pub.Revision.HatchetName + ":" + action}}}}}
+	b.ready = wr.Message{Type: "ready", Protocol: 1, WorkspaceID: workspaceID, TenantID: tenant, Generation: b.cred.Generation, RunnerVersion: "0.1.0", NodeVersion: "22.23.3", Registrations: []wr.Registration{{Revision: wireRevision(pub.Revision), EngineWorkflowID: "20000000-0000-0000-0000-000000000002", EngineVersionID: "30000000-0000-0000-0000-000000000003", Actions: []wr.Action{{StepID: "a", TaskName: action, ActionID: pub.Revision.HatchetName + ":" + action}}}}}
 	return b
 }
 func (b *workflowBoundary) request(method, path string, body any) *http.Request {
 	r := newRequest(method, "/api/daemon/workflows/"+path, body)
 	r.Header.Set("Authorization", "Bearer "+b.control)
-	r.Header.Set("X-Workspace-ID", testWorkspaceID)
+	r.Header.Set("X-Workspace-ID", b.workspaceID)
 	return r
 }
 

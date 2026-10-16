@@ -29,6 +29,7 @@ import (
 type WorkflowTenantProvider interface {
 	WorkerCredentials(context.Context, pgtype.UUID, string, string) (hatchet.TenantCredentials, error)
 	Ensure(context.Context, pgtype.UUID) (hatchet.TenantCredentials, error)
+	MappedCredentials(context.Context, pgtype.UUID) (hatchet.TenantCredentials, error)
 	RevokeWorkerCredentials(context.Context, hatchet.TenantCredentials) error
 }
 type WorkflowRegistrationVerifier interface {
@@ -386,7 +387,7 @@ func (h *Handler) workflowRunnerAcknowledge(w http.ResponseWriter, r *http.Reque
 		workflowDenied(w, 503, "workflow_unavailable")
 		return
 	}
-	cred, e := h.WorkflowControl.Tenants.Ensure(r.Context(), d.WorkspaceID)
+	cred, e := h.WorkflowControl.Tenants.MappedCredentials(r.Context(), d.WorkspaceID)
 	if e != nil || cred.TenantID != m.TenantID {
 		workflowDenied(w, 503, "workflow_unavailable")
 		return
