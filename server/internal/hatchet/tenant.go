@@ -321,6 +321,21 @@ func (s *TenantService) CleanupPending(ctx context.Context) error {
 	if s.queries == nil {
 		return result
 	}
+	workers, err := s.queries.ListWorkflowRunnerEngineCleanup(ctx)
+	if err != nil {
+		return errors.Join(result, errors.New("hatchet: worker cleanup read failed"))
+	}
+	for _, worker := range workers {
+		if worker.EngineTokenID == "" {
+			result = errors.Join(result, ErrUnavailable)
+			continue
+		}
+		if err := s.RevokeWorkerCredentials(ctx, TenantCredentials{TenantID: worker.TenantID, TokenID: worker.EngineTokenID}); err != nil {
+			result = errors.Join(result, err)
+		} else if err := s.queries.ConfirmWorkflowRunnerEngineRevocation(ctx, db.ConfirmWorkflowRunnerEngineRevocationParams{ID: worker.ID, EngineTokenID: worker.EngineTokenID}); err != nil {
+			result = errors.Join(result, err)
+		}
+	}
 	rows, err := s.queries.ListWorkflowHatchetTenantDeletions(ctx, 100)
 	if err != nil {
 		return errors.Join(result, errors.New("hatchet: pending tenant cleanup read failed"))
@@ -361,6 +376,16 @@ func (s *TenantService) WorkerCredentials(ctx context.Context, workspace pgtype.
 	if e != nil {
 		return TenantCredentials{}, e
 	}
+	worker.TokenID = tokenID
+	parts := strings.Split(worker.Token, ".")
+	rawClaims, _ := base64.RawURLEncoding.DecodeString(parts[1])
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if json.Unmarshal(rawClaims, &claims) != nil || claims.Exp <= time.Now().Unix() {
+		return TenantCredentials{}, s.abandonWorker(ctx, cred.TenantID, tokenID, errors.New("hatchet: invalid worker token expiry"))
+	}
+	worker.ExpiresAt = time.Unix(claims.Exp, 0)
 	row, readErr := s.store.GetWorkflowHatchetTenant(ctx, workspace)
 	if readErr != nil {
 		cause := errors.New("hatchet: worker mapping recheck failed")

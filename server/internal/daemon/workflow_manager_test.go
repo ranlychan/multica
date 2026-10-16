@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -216,7 +217,7 @@ func TestWorkflowCandidateCacheFailurePreservesHealthyCurrentAndLease(t *testing
 		t.Fatal("candidate cache failure stopped healthy current")
 	default:
 	}
-	if rotations != 0 || acks != 1 || !g.next.After(time.Now()) {
+	if rotations != 0 || acks != 2 || !g.next.After(time.Now()) {
 		t.Fatalf("candidate failure rotated=%d old lease renewals=%d backed off=%t", rotations, acks, g.next.After(time.Now()))
 	}
 }
@@ -237,6 +238,293 @@ func TestWorkflowCurrentCrashDoesNotForceStopValidRetiringWork(t *testing.T) {
 	}
 	if g.process != nil || g.retiring == nil || !g.next.After(time.Now()) {
 		t.Fatal("failed current did not back off independently")
+	}
+}
+
+func TestWorkflowCandidateBackoffNeverSkipsCurrentOrRetiringLease(t *testing.T) {
+	acks := 0
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/ack") {
+			acks++
+		}
+		w.Write([]byte(`{"revisions":[]}`))
+	}))
+	defer s.Close()
+	m := newWorkflowManager(WorkflowRunnerConfig{Enabled: true, AcceptedCodeRisk: true, Workspaces: []string{"ws"}}, NewClient(s.URL))
+	m.generations["ws"] = &workflowGeneration{control: "wdc_test", process: workflowOwnedTestProcess(t, false), next: time.Now().Add(64 * time.Second), retiring: &workflowGeneration{process: workflowOwnedTestProcess(t, false), expires: time.Now().Add(time.Minute)}}
+	for i := 0; i < 3; i++ {
+		m.reconcile(context.Background(), map[string]bool{"ws": true})
+	}
+	if acks != 6 {
+		t.Fatalf("candidate backoff skipped lease heartbeats: got%d want6", acks)
+	}
+}
+
+func TestWorkflowSlowWorkspaceDoesNotStarveOtherLease(t *testing.T) {
+	blocked := make(chan struct{})
+	var mu sync.Mutex
+	acks := map[string]int{}
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws := r.Header.Get("X-Workspace-ID")
+		if strings.HasSuffix(r.URL.Path, "/revisions") {
+			<-blocked
+		}
+		if strings.HasSuffix(r.URL.Path, "/ack") {
+			mu.Lock()
+			acks[ws]++
+			mu.Unlock()
+		}
+		w.Write([]byte(`{"revisions":[]}`))
+	}))
+	defer s.Close()
+	m := newWorkflowManager(WorkflowRunnerConfig{Enabled: true, AcceptedCodeRisk: true, Workspaces: []string{"a", "b"}}, NewClient(s.URL))
+	for _, ws := range []string{"a", "b"} {
+		m.generations[ws] = &workflowGeneration{control: "wdc_test", process: workflowOwnedTestProcess(t, false)}
+	}
+	done := make(chan struct{})
+	go func() { defer close(done); m.reconcile(context.Background(), map[string]bool{"a": true, "b": true}) }()
+	time.Sleep(200 * time.Millisecond)
+	mu.Lock()
+	both := acks["a"] > 0 && acks["b"] > 0
+	mu.Unlock()
+	close(blocked)
+	<-done
+	if !both {
+		t.Fatal("one slow workspace starved independent current leases")
+	}
+}
+
+func TestWorkflowCandidateBackoffMaintainsLeasesAcrossFullLeaseInterval(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	last := map[string]time.Time{}
+	acks := 0
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/ack") {
+			var message wr.Message
+			_ = json.NewDecoder(r.Body).Decode(&message)
+			mu.Lock()
+			last[message.Generation] = time.Now()
+			acks++
+			mu.Unlock()
+		}
+		w.Write([]byte(`{"revisions":[]}`))
+	}))
+	defer s.Close()
+	m := newWorkflowManager(WorkflowRunnerConfig{Enabled: true, AcceptedCodeRisk: true, Workspaces: []string{"ws"}}, NewClient(s.URL))
+	current, old := workflowOwnedTestProcess(t, false), workflowOwnedTestProcess(t, false)
+	m.generations["ws"] = &workflowGeneration{control: "wdc_test", process: current, ready: wr.Message{Generation: "current"}, next: time.Now().Add(64 * time.Second), retiring: &workflowGeneration{process: old, ready: wr.Message{Generation: "retiring"}, expires: time.Now().Add(time.Minute)}}
+	started := time.Now()
+	for i := 0; i < 6; i++ {
+		if i > 0 {
+			time.Sleep(10 * time.Second)
+		}
+		m.reconcile(context.Background(), map[string]bool{"ws": true})
+		mu.Lock()
+		healthy := time.Since(last["current"]) < 45*time.Second && time.Since(last["retiring"]) < 45*time.Second
+		mu.Unlock()
+		if !healthy {
+			t.Fatal("backoff expired an otherwise healthy action lease")
+		}
+	}
+	if time.Since(started) < 45*time.Second || acks != 12 {
+		t.Fatal("full action lease interval not covered")
+	}
+}
+
+func TestWorkflowTwoSlowCandidatesRenewIndependentlyAndRemovalFencesOwner(t *testing.T) {
+	source := `import {defineWorkflow} from '@multica/workflow-sdk';export default defineWorkflow({steps:[{id:'a',run:async()=>null}]});`
+	graph := wr.Graph{Steps: []wr.Step{{ID: "a", Parents: []string{}}}}
+	revision := wr.Revision{RevisionID: "candidate", Source: source, Hash: wr.Hash(source), Graph: graph, GraphDigest: wr.GraphDigest(graph)}
+	entered := make(chan string, 2)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	var mu sync.Mutex
+	acks := map[string]int{}
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws := r.Header.Get("X-Workspace-ID")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/revisions"):
+			json.NewEncoder(w).Encode(map[string]any{"revisions": []wr.Revision{revision}})
+		case strings.HasSuffix(r.URL.Path, "/ack"):
+			mu.Lock()
+			acks[ws]++
+			mu.Unlock()
+			w.Write([]byte(`{}`))
+		case strings.HasSuffix(r.URL.Path, "/rotate"):
+			entered <- ws
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+			w.WriteHeader(503)
+		default:
+			w.Write([]byte(`{}`))
+		}
+	}))
+	defer func() { releaseOnce.Do(func() { close(release) }); s.Close() }()
+	entry, _ := filepath.Abs("../../../packages/workflow-runner/dist/cli.js")
+	m := newWorkflowManager(WorkflowRunnerConfig{Enabled: true, AcceptedCodeRisk: true, Workspaces: []string{"a", "b"}, Node: workflowTestNode(t), Entry: entry, Cache: filepath.Join(t.TempDir(), "cache")}, NewClient(s.URL))
+	for _, ws := range []string{"a", "b"} {
+		m.generations[ws] = &workflowGeneration{control: "wdc_old_" + ws, process: workflowOwnedTestProcess(t, false), started: time.Now()}
+	}
+	done := make(chan struct{})
+	go func() { defer close(done); m.reconcile(context.Background(), map[string]bool{"a": true, "b": true}) }()
+	for i := 0; i < 2; i++ {
+		select {
+		case <-entered:
+		case <-time.After(3 * time.Second):
+			t.Fatal("candidate preparation serialized across workspaces")
+		}
+	}
+	time.Sleep(11 * time.Second)
+	mu.Lock()
+	both := acks["a"] >= 2 && acks["b"] >= 2
+	mu.Unlock()
+	if !both {
+		t.Fatal("slow candidates starved checked generation heartbeats")
+	}
+	removed := make(chan struct{})
+	go func() { m.remove("a"); m.enroll("a", "wdc_fresh"); close(removed) }()
+	select {
+	case <-removed:
+	case <-time.After(4 * time.Second):
+		t.Fatal("removal could not cancel stale preparation")
+	}
+	if m.generations["a"].control != "wdc_fresh" {
+		t.Fatal("stale owner replaced fresh enrollment")
+	}
+	// Release the remaining workspace without requiring a preparation timeout.
+	releaseOnce.Do(func() { close(release) })
+	<-done
+	if m.generations["a"].control != "wdc_fresh" {
+		t.Fatal("stale candidate completion overwrote fresh owner")
+	}
+}
+
+func TestWorkflowRunLoopTicksRenewFastPairWhileBodyAndControlRenewalBlock(t *testing.T) {
+	// Production uses10s ticks and45s leases; scale only scheduler time100x.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	release := make(chan struct{})
+	renewEntered := make(chan struct{}, 1)
+	var mu sync.Mutex
+	last := map[string]time.Time{}
+	counts := map[string]int{}
+	gap := time.Duration(0)
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Workspace-ID") == "slow" {
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+			w.WriteHeader(503)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/ack") {
+			var message wr.Message
+			_ = json.NewDecoder(r.Body).Decode(&message)
+			mu.Lock()
+			now := time.Now()
+			if !last[message.Generation].IsZero() && now.Sub(last[message.Generation]) > gap {
+				gap = now.Sub(last[message.Generation])
+			}
+			last[message.Generation] = now
+			counts[message.Generation]++
+			mu.Unlock()
+		}
+		w.Write([]byte(`{"revisions":[]}`))
+	}))
+	defer func() { close(release); s.Close() }()
+	m := newWorkflowManager(WorkflowRunnerConfig{Enabled: true, AcceptedCodeRisk: true, Workspaces: []string{"fast", "slow"}}, NewClient(s.URL))
+	m.generations["fast"] = &workflowGeneration{control: "wdc_fast", enrolled: time.Now(), process: workflowOwnedTestProcess(t, false), ready: wr.Message{Generation: "current"}, next: time.Now().Add(64 * time.Second), retiring: &workflowGeneration{process: workflowOwnedTestProcess(t, false), ready: wr.Message{Generation: "retiring"}, expires: time.Now().Add(time.Minute)}}
+	m.generations["slow"] = &workflowGeneration{control: "wdc_slow", enrolled: time.Now().Add(-13 * time.Hour)}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		m.run(ctx, 100*time.Millisecond, func() map[string]bool { return map[string]bool{"fast": true, "slow": true} }, func(renewCtx context.Context, ws string) {
+			renewEntered <- struct{}{}
+			<-renewCtx.Done()
+			m.enrollForRegistration(renewCtx, ws, "wdc_slow", "wdc_stale")
+		})
+	}()
+	select {
+	case <-renewEntered:
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatal("blocked body prevented independent control renewal scheduling")
+	}
+	time.Sleep(650 * time.Millisecond)
+	mu.Lock()
+	healthy := counts["current"] >= 5 && counts["retiring"] >= 5 && gap < 450*time.Millisecond
+	mu.Unlock()
+	m.remove("slow")
+	m.enroll("slow", "wdc_fresh")
+	m.mu.Lock()
+	fresh := m.generations["slow"].control
+	m.mu.Unlock()
+	cancel()
+	<-done
+	if !healthy {
+		t.Fatal("actual scheduler loop starved fast pair behind blocked workspace/renewal")
+	}
+	if fresh != "wdc_fresh" {
+		t.Fatal("cancelled control renewal committed over fresh owner")
+	}
+}
+
+func TestWorkflowCandidateTimeoutNeverConsumesCurrentLeaseBudget(t *testing.T) {
+	for _, slow := range []string{"drafts", "rotate"} {
+		t.Run(slow, func(t *testing.T) {
+			t.Parallel()
+			source := `import {defineWorkflow} from '@multica/workflow-sdk';export default defineWorkflow({steps:[{id:'a',run:async()=>null}]});`
+			graph := wr.Graph{Steps: []wr.Step{{ID: "a", Parents: []string{}}}}
+			revisions := []wr.Revision{{RevisionID: "candidate", Source: source, Hash: wr.Hash(source), Graph: graph, GraphDigest: wr.GraphDigest(graph)}}
+			if slow == "drafts" {
+				revisions = nil
+				for i := 0; i < 7; i++ {
+					revisions = append(revisions, wr.Revision{RevisionID: "invalid", Source: "while(true){}", Hash: wr.Hash("while(true){}"), Graph: graph, GraphDigest: wr.GraphDigest(graph)})
+				}
+			}
+			var mu sync.Mutex
+			acks := 0
+			release := make(chan struct{})
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/revisions"):
+					json.NewEncoder(w).Encode(map[string]any{"revisions": revisions})
+				case strings.HasSuffix(r.URL.Path, "/rotate"):
+					select {
+					case <-r.Context().Done():
+					case <-release:
+					}
+				case strings.HasSuffix(r.URL.Path, "/ack"):
+					mu.Lock()
+					acks++
+					mu.Unlock()
+					w.Write([]byte(`{}`))
+				default:
+					w.Write([]byte(`{}`))
+				}
+			}))
+			defer func() { close(release); s.Close() }()
+			entry, _ := filepath.Abs("../../../packages/workflow-runner/dist/cli.js")
+			m := newWorkflowManager(WorkflowRunnerConfig{Enabled: true, AcceptedCodeRisk: true, Workspaces: []string{"ws"}, Node: workflowTestNode(t), Entry: entry, Cache: filepath.Join(t.TempDir(), "cache")}, NewClient(s.URL))
+			p := workflowOwnedTestProcess(t, false)
+			m.generations["ws"] = &workflowGeneration{control: "wdc_test", process: p, signature: wr.Hash("[]"), started: time.Now()}
+			m.reconcile(context.Background(), map[string]bool{"ws": true})
+			select {
+			case <-p.done:
+				t.Fatal("candidate timeout stopped healthy current")
+			default:
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if acks < 2 {
+				t.Fatal("candidate timeout exhausted independent current lease renewal")
+			}
+		})
 	}
 }
 

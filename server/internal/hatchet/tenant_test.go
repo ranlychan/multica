@@ -178,7 +178,7 @@ func (m *tenantMemory) GetWorkflowHatchetTenant(context.Context, pgtype.UUID) (d
 	return m.row, nil
 }
 
-const testWorkerToken = "eyJhbGciOiJFUzI1NiJ9.eyJ0b2tlbl9pZCI6IjM0NTY3ODkwLTEyMzQtNDIzNC04MjM0LTEyMzQ1Njc4OWFiYyJ9.signature"
+const testWorkerToken = "eyJhbGciOiJFUzI1NiJ9.eyJ0b2tlbl9pZCI6IjM0NTY3ODkwLTEyMzQtNDIzNC04MjM0LTEyMzQ1Njc4OWFiYyIsImV4cCI6NDEwMjQ0NDgwMH0.signature"
 const testWorkerTokenID = "34567890-1234-4234-8234-123456789abc"
 
 func TestHatchetWorkerTransientReadOnlyRevokesIssuedToken(t *testing.T) {

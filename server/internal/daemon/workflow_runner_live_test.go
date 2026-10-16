@@ -292,6 +292,60 @@ func TestWorkflowGoPackagedControlLive(t *testing.T) {
 	if !h.WorkflowRunnerEligible(ctx, ws, publish.Revision.ID) {
 		t.Fatal("ack did not grant revision eligibility")
 	}
+	// Delivered-but-unprepared candidates count toward the engine credential pair.
+	// Observe the exact pin's authoritative token row without exporting this DB
+	// URL or server authority to a worker (test-only read, never production writes).
+	enginePool, err := pgxpool.New(ctx, config.DatabaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer enginePool.Close()
+	engineRevoked := func(generation string) bool {
+		t.Helper()
+		var tokenID string
+		if err := testPool.QueryRow(ctx, "SELECT engine_token_id FROM workflow_runner_token WHERE id=$1", generation).Scan(&tokenID); err != nil {
+			t.Fatal(err)
+		}
+		var revoked bool
+		if err := enginePool.QueryRow(ctx, `SELECT revoked FROM "APIToken" WHERE id=$1`, tokenID).Scan(&revoked); err != nil {
+			t.Fatal(err)
+		}
+		return revoked
+	}
+	var abandoned, replacement wr.Credentials
+	if call("POST", "/api/daemon/workflows/rotate", enrollment.Token, testWorkspaceID, nil, &abandoned) != 200 || call("POST", "/api/daemon/workflows/rotate", enrollment.Token, testWorkspaceID, nil, &replacement) != 200 {
+		t.Fatal("candidate cleanup rotation")
+	}
+	if !engineRevoked(abandoned.Generation) || engineRevoked(oldGeneration) {
+		t.Fatal("delivered cleanup did not revoke exact candidate and preserve current")
+	}
+	probeRevision := generation.ready.Registrations[0].Revision
+	probeRevision.SourcePath, e = runner.CacheSource(source(1), probeRevision.Hash)
+	if e != nil {
+		t.Fatal(e)
+	}
+	probe := func(c wr.Credentials) error {
+		probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		p, _, err := runner.startWorker(ctx, probeCtx, wr.Descriptor{Protocol: 1, WorkspaceID: testWorkspaceID, TenantID: c.TenantID, Generation: c.Generation, Engine: wr.Engine{Token: c.EngineToken, HostPort: runner.Config.EngineAddress, TLS: runner.Config.TLS}, Product: wr.Product{Origin: product.URL, RunnerToken: c.RunnerToken}, Revisions: []wr.Revision{probeRevision}, ActivationGate: true, DrainTimeoutMS: 1000})
+		if p != nil {
+			p.Stop(time.Second)
+		}
+		return err
+	}
+	if probe(replacement) != nil {
+		t.Fatal("healthy replacement credential cannot register through packaged gRPC")
+	}
+	if probe(abandoned) == nil {
+		t.Fatal("superseded never-used worker JWT still accepted new packaged registration")
+	}
+	if call("POST", "/api/daemon/workflows/retire", enrollment.Token, testWorkspaceID, map[string]string{"generation": replacement.Generation}, nil) != 200 || !engineRevoked(replacement.Generation) || engineRevoked(oldGeneration) {
+		t.Fatal("exact candidate retirement cleanup")
+	}
+	if call("POST", "/api/daemon/workflows/ack", enrollment.Token, testWorkspaceID, generation.ready, nil) != 200 {
+		t.Fatal("candidate cleanup disrupted healthy current")
+	}
+	t.Log("delivered candidate JWT target revoked; new packaged gRPC registration rejected; healthy current preserved")
 	serverCred, e := tenants.Ensure(ctx, ws)
 	if e != nil {
 		t.Fatal(e)
@@ -513,6 +567,10 @@ func TestWorkflowGoPackagedControlLive(t *testing.T) {
 	if !observedSleep {
 		t.Fatalf("sleeping R1 SDK action not observed: remaining=%+v expected run=%s generation=%s newRun=%s", remaining, uuidToString(sleepRun.ID), ready.Generation, uuidToString(newRun.ID))
 	}
+	manager.reconcile(ctx, watched)
+	if generation.retiring != nil || !engineRevoked(oldGeneration) || engineRevoked(ready.Generation) {
+		t.Fatal("completed retiring engine credential not targeted independently of healthy current")
+	}
 	if call("GET", "/api/daemon/workflows/revisions", enrollment.Token, "10000000-0000-0000-0000-000000000001", nil, nil) != 401 {
 		t.Fatal("cross workspace accepted")
 	}
@@ -521,6 +579,9 @@ func TestWorkflowGoPackagedControlLive(t *testing.T) {
 	}
 	if h.WorkflowRunnerEligible(ctx, ws, publish2.Revision.ID) {
 		t.Fatal("revoked generation still eligible")
+	}
+	if !engineRevoked(ready.Generation) {
+		t.Fatal("global revoke left current engine credential valid")
 	}
 	if call("POST", "/api/daemon/workflows/ack", enrollment.Token, testWorkspaceID, ready, nil) != 401 {
 		t.Fatal("revoked ack")

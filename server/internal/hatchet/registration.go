@@ -87,7 +87,11 @@ func (c *Client) VerifyRegistration(ctx context.Context, cred TenantCredentials,
 
 // RevokeWorkerCredentials targets only a token minted for a failed/retired generation.
 func (s *TenantService) RevokeWorkerCredentials(ctx context.Context, cred TenantCredentials) error {
-	id, err := workerTokenID(cred.Token)
+	id := cred.TokenID
+	var err error
+	if id == "" {
+		id, err = workerTokenID(cred.Token)
+	}
 	if err != nil {
 		return err
 	}

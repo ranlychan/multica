@@ -20,8 +20,10 @@ var ErrTenantDeletionUnsupported = errors.New("hatchet: tenant_deletion_unsuppor
 
 // TenantCredentials are server-only. Do not serialize these into product APIs.
 type TenantCredentials struct {
-	TenantID string
-	Token    string
+	TenantID  string
+	Token     string
+	TokenID   string
+	ExpiresAt time.Time
 }
 type SubmitRequest struct {
 	RunID        string

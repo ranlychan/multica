@@ -45,9 +45,13 @@ func TestWorkflowDurableContracts(t *testing.T) {
 	}
 	sort.Strings(files)
 	var applied []string
+	legacyID, legacyWS := uuid.NewString(), uuid.NewString()
 	for _, file := range files {
-		if filepath.Base(file) < "564_" || filepath.Base(file) >= "602_" {
+		if filepath.Base(file) < "564_" || filepath.Base(file) >= "604_" {
 			continue
+		}
+		if strings.HasPrefix(filepath.Base(file), "602_") {
+			exec(fmt.Sprintf("INSERT INTO workflow_runner_token(id,workspace_id,daemon_id,token_hash,expires_at) VALUES('%s','%s','migration-legacy','legacy-hash',now()+interval '1 hour')", legacyID, legacyWS))
 		}
 		b, err := os.ReadFile(file)
 		if err != nil {
@@ -65,6 +69,42 @@ func TestWorkflowDurableContracts(t *testing.T) {
 	ws, wf, rev, principal, trig, run := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
 	u := func(s string) pgtype.UUID { return pgtype.UUID{Bytes: uuid.MustParse(s), Valid: true} }
 	q := db.New(c)
+	t.Run("engine cleanup distinguishes pre602 unknown issuance from new reservation", func(t *testing.T) {
+		var unknown bool
+		if err := c.QueryRow(ctx, "SELECT engine_issuance_unknown FROM workflow_runner_token WHERE id=$1", legacyID).Scan(&unknown); err != nil || !unknown {
+			t.Fatal("legacy issuance falsely declared known", err)
+		}
+		reservation, err := q.CreateWorkflowRunnerGeneration(ctx, db.CreateWorkflowRunnerGenerationParams{WorkspaceID: u(legacyWS), DaemonID: "migration-new", TokenHash: "reserved-hash", ExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true}, ControlHash: "test", TenantID: uuid.NewString()})
+		if err != nil || reservation.EngineIssuanceUnknown || reservation.EngineTokenID != "" {
+			t.Fatal("new unissued reservation not distinguished", err)
+		}
+		exec("UPDATE workflow_runner_token SET revoked_at=now()")
+		rows, err := q.ListWorkflowRunnerEngineCleanupForDaemon(ctx, db.ListWorkflowRunnerEngineCleanupForDaemonParams{WorkspaceID: u(legacyWS), DaemonID: "migration-legacy"})
+		if err != nil || len(rows) != 1 || !rows[0].EngineIssuanceUnknown {
+			t.Fatal("unknown issuance lost cleanup backpressure", err)
+		}
+		rows, err = q.ListWorkflowRunnerEngineCleanupForDaemon(ctx, db.ListWorkflowRunnerEngineCleanupForDaemonParams{WorkspaceID: u(legacyWS), DaemonID: "migration-new"})
+		if err != nil || len(rows) != 0 {
+			t.Fatal("known unissued reservation treated as delivered", err)
+		}
+		crash, err := q.CreateWorkflowRunnerGeneration(ctx, db.CreateWorkflowRunnerGenerationParams{WorkspaceID: u(legacyWS), DaemonID: "migration-crash", TokenHash: "crash-hash", ExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(time.Hour + 30*time.Second), Valid: true}, ControlHash: "test", TenantID: uuid.NewString()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n, err := q.BeginWorkflowRunnerEngineIssuance(ctx, crash.ID); err != nil || n != 1 {
+			t.Fatal("issuance boundary not persisted", err)
+		}
+		exec(fmt.Sprintf("UPDATE workflow_runner_token SET revoked_at=now() WHERE id='%s'", uuid.UUID(crash.ID.Bytes).String()))
+		rows, err = q.ListWorkflowRunnerEngineCleanupForDaemon(ctx, db.ListWorkflowRunnerEngineCleanupForDaemonParams{WorkspaceID: u(legacyWS), DaemonID: "migration-crash"})
+		if err != nil || len(rows) != 1 || !rows[0].EngineIssuanceUnknown || rows[0].EngineTokenID != "" {
+			t.Fatal("crashed issuance lost durable unknown state", err)
+		}
+		exec(fmt.Sprintf("UPDATE workflow_runner_token SET created_at=now()-interval '2 hours',expires_at=now()-interval '1 second' WHERE id='%s'", legacyID))
+		rows, err = q.ListWorkflowRunnerEngineCleanupForDaemon(ctx, db.ListWorkflowRunnerEngineCleanupForDaemonParams{WorkspaceID: u(legacyWS), DaemonID: "migration-legacy"})
+		if err != nil || len(rows) != 0 {
+			t.Fatal("original expiry failed to release unknown issuance backpressure", err)
+		}
+	})
 	exec(fmt.Sprintf("INSERT INTO workflow(id,workspace_id,name,slug,created_by_type,created_by_id) VALUES ('%s','%s','test','test','member','%s')", wf, ws, principal))
 	exec(fmt.Sprintf("INSERT INTO member(workspace_id,user_id) VALUES ('%s','%s')", ws, principal))
 	t.Run("immutable revisions and increasing version", func(t *testing.T) {

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/hatchet"
@@ -114,9 +115,17 @@ func (h *Handler) enrollWorkflowDaemon(r *http.Request, req DaemonRegisterReques
 	if e != nil {
 		return "", errors.New("workflow_forbidden")
 	}
+	if token != req.WorkflowControlToken || !req.WorkflowCapable {
+		// Replacing authority must fence the previous owner's whole pair in the
+		// same transaction. Possession-backed renewal leaves that pair untouched.
+		if e = q.RevokeWorkflowRunnerTokens(r.Context(), db.RevokeWorkflowRunnerTokensParams{WorkspaceID: ws, DaemonID: req.DaemonID}); e != nil {
+			return "", errors.New("workflow_unavailable")
+		}
+	}
 	if tx.Commit(r.Context()) != nil {
 		return "", errors.New("workflow_unavailable")
 	}
+	_ = h.cleanupWorkflowRunnerCredentials(r.Context(), ws, req.DaemonID)
 	return token, nil
 }
 func (h *Handler) authorizeWorkflowControl(w http.ResponseWriter, r *http.Request) (db.WorkflowDaemon, bool) {
@@ -159,6 +168,44 @@ func (h *Handler) WorkflowRunnerRevisions(w http.ResponseWriter, r *http.Request
 	}
 	writeJSON(w, 200, map[string]any{"revisions": revisions})
 }
+
+// This helper never performs engine I/O while holding application row locks.
+func (h *Handler) lockWorkflowGeneration(ctx context.Context, d db.WorkflowDaemon) (pgx.Tx, *db.Queries, error) {
+	tx, err := h.TxStarter.Begin(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	q := h.Queries.WithTx(tx)
+	if _, err = q.LockWorkspaceForChatSessionCreate(ctx, d.WorkspaceID); err == nil {
+		_, err = q.LockWorkflowControl(ctx, db.LockWorkflowControlParams{WorkspaceID: d.WorkspaceID, ControlHash: d.ControlHash})
+	}
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		return nil, nil, err
+	}
+	return tx, q, nil
+}
+func (h *Handler) cleanupWorkflowRunnerCredentials(ctx context.Context, ws pgtype.UUID, daemon string) error {
+	rows, err := h.Queries.ListWorkflowRunnerEngineCleanupForDaemon(ctx, db.ListWorkflowRunnerEngineCleanupForDaemonParams{WorkspaceID: ws, DaemonID: daemon})
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if row.EngineTokenID == "" {
+			return errors.New("workflow_cleanup_pending")
+		}
+		if h.WorkflowControl == nil || h.WorkflowControl.Tenants == nil {
+			return errors.New("workflow_unavailable")
+		}
+		if err = h.WorkflowControl.Tenants.RevokeWorkerCredentials(ctx, hatchet.TenantCredentials{TenantID: row.TenantID, TokenID: row.EngineTokenID}); err != nil {
+			return err
+		}
+		if err = h.Queries.ConfirmWorkflowRunnerEngineRevocation(ctx, db.ConfirmWorkflowRunnerEngineRevocationParams{ID: row.ID, EngineTokenID: row.EngineTokenID}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 func (h *Handler) WorkflowRunnerRotate(w http.ResponseWriter, r *http.Request) {
 	d, ok := h.authorizeWorkflowControl(w, r)
 	if !ok {
@@ -168,42 +215,14 @@ func (h *Handler) WorkflowRunnerRotate(w http.ResponseWriter, r *http.Request) {
 		workflowDenied(w, 503, "workflow_unavailable")
 		return
 	}
-	// Provision outside SQL locks: TenantService independently locks the workspace.
-	// The control identity is locked/rechecked afterward before any delivery.
-	cred, e := h.WorkflowControl.Tenants.WorkerCredentials(r.Context(), d.WorkspaceID, d.DaemonID, "1h")
-	if e != nil {
-		workflowDenied(w, 503, "workflow_unavailable")
-		return
-	}
-	delivered := false
-	defer func() {
-		if !delivered {
-			ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
-			defer cancel()
-			_ = h.WorkflowControl.Tenants.RevokeWorkerCredentials(ctx, cred)
-		}
-	}()
-	tx, e := h.TxStarter.Begin(r.Context())
+	// Fence a superseded candidate before minting. Concurrent issuance owns a
+	// reservation (empty engine ID) and cannot be superseded while mint is in flight.
+	tx, q, e := h.lockWorkflowGeneration(r.Context(), d)
 	if e != nil {
 		workflowDenied(w, 503, "workflow_unavailable")
 		return
 	}
 	defer tx.Rollback(r.Context())
-	q := h.Queries.WithTx(tx)
-	if _, e = q.LockWorkspaceForChatSessionCreate(r.Context(), d.WorkspaceID); e != nil {
-		workflowDenied(w, 401, "workflow_unauthenticated")
-		return
-	}
-	d, e = q.LockWorkflowControl(r.Context(), db.LockWorkflowControlParams{WorkspaceID: d.WorkspaceID, ControlHash: d.ControlHash})
-	if e != nil {
-		workflowDenied(w, 401, "workflow_unauthenticated")
-		return
-	}
-	token, e := workflowSecret("wrt_")
-	if e != nil {
-		workflowDenied(w, 503, "workflow_unavailable")
-		return
-	}
 	pending, e := q.WorkflowRunnerRetirementPending(r.Context(), db.WorkflowRunnerRetirementPendingParams{WorkspaceID: d.WorkspaceID, DaemonID: d.DaemonID})
 	if e != nil {
 		workflowDenied(w, 503, "workflow_unavailable")
@@ -213,17 +232,102 @@ func (h *Handler) WorkflowRunnerRotate(w http.ResponseWriter, r *http.Request) {
 		workflowDenied(w, 409, "workflow_retirement_pending")
 		return
 	}
+	issuing, e := q.WorkflowRunnerIssuancePending(r.Context(), db.WorkflowRunnerIssuancePendingParams{WorkspaceID: d.WorkspaceID, DaemonID: d.DaemonID})
+	if e != nil || issuing {
+		workflowDenied(w, 409, "workflow_cleanup_pending")
+		return
+	}
 	if e = q.RevokeWorkflowCandidateAndExpiredGenerations(r.Context(), db.RevokeWorkflowCandidateAndExpiredGenerationsParams{WorkspaceID: d.WorkspaceID, DaemonID: d.DaemonID}); e != nil {
 		workflowDenied(w, 503, "workflow_unavailable")
 		return
 	}
-	row, e := q.CreateWorkflowRunnerGeneration(r.Context(), db.CreateWorkflowRunnerGenerationParams{WorkspaceID: d.WorkspaceID, DaemonID: d.DaemonID, TokenHash: auth.HashToken(token), CreatedByID: d.OwnerID, ExpiresAt: pgtype.Timestamptz{Time: time.Now().Add(time.Hour), Valid: true}, ControlHash: d.ControlHash, TenantID: cred.TenantID})
-	if e != nil || tx.Commit(r.Context()) != nil {
+	if tx.Commit(r.Context()) != nil {
+		workflowDenied(w, 503, "workflow_unavailable")
+		return
+	}
+	if h.cleanupWorkflowRunnerCredentials(r.Context(), d.WorkspaceID, d.DaemonID) != nil {
+		workflowDenied(w, 409, "workflow_cleanup_pending")
+		return
+	}
+	// Ensure is server-only, outside locks. Recheck ownership/pair before reserving.
+	serverCred, e := h.WorkflowControl.Tenants.Ensure(r.Context(), d.WorkspaceID)
+	if e != nil {
+		workflowDenied(w, 503, "workflow_unavailable")
+		return
+	}
+	tx, q, e = h.lockWorkflowGeneration(r.Context(), d)
+	if e != nil {
+		workflowDenied(w, 401, "workflow_unauthenticated")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	pending, e = q.WorkflowRunnerRetirementPending(r.Context(), db.WorkflowRunnerRetirementPendingParams{WorkspaceID: d.WorkspaceID, DaemonID: d.DaemonID})
+	issuing, issueErr := q.WorkflowRunnerIssuancePending(r.Context(), db.WorkflowRunnerIssuancePendingParams{WorkspaceID: d.WorkspaceID, DaemonID: d.DaemonID})
+	cleanup, cleanupErr := q.ListWorkflowRunnerEngineCleanupForDaemon(r.Context(), db.ListWorkflowRunnerEngineCleanupForDaemonParams{WorkspaceID: d.WorkspaceID, DaemonID: d.DaemonID})
+	if e != nil || issueErr != nil || cleanupErr != nil || pending || issuing || len(cleanup) > 0 {
+		workflowDenied(w, 409, "workflow_cleanup_pending")
+		return
+	}
+	token, e := workflowSecret("wrt_")
+	if e != nil {
+		workflowDenied(w, 503, "workflow_unavailable")
+		return
+	}
+	issuanceDeadline := time.Now().Add(30 * time.Second)
+	row, e := q.CreateWorkflowRunnerGeneration(r.Context(), db.CreateWorkflowRunnerGenerationParams{WorkspaceID: d.WorkspaceID, DaemonID: d.DaemonID, TokenHash: auth.HashToken(token), CreatedByID: d.OwnerID, ExpiresAt: pgtype.Timestamptz{Time: issuanceDeadline.Add(time.Hour), Valid: true}, ControlHash: d.ControlHash, TenantID: serverCred.TenantID})
+	if e != nil {
+		workflowDenied(w, 503, "workflow_unavailable")
+		return
+	}
+	if n, err := q.BeginWorkflowRunnerEngineIssuance(r.Context(), row.ID); err != nil || n != 1 {
+		workflowDenied(w, 503, "workflow_unavailable")
+		return
+	}
+	if tx.Commit(r.Context()) != nil {
+		workflowDenied(w, 503, "workflow_unavailable")
+		return
+	}
+	mintCtx, mintCancel := context.WithDeadline(r.Context(), issuanceDeadline)
+	cred, e := h.WorkflowControl.Tenants.WorkerCredentials(mintCtx, d.WorkspaceID, d.DaemonID, "1h")
+	mintCancel()
+	var receipt *hatchet.WorkerTokenRevocationError
+	if errors.As(e, &receipt) && receipt.TenantID == serverCred.TenantID {
+		cred = hatchet.TenantCredentials{TenantID: receipt.TenantID, TokenID: receipt.TokenID, ExpiresAt: row.ExpiresAt.Time}
+	}
+	delivered := false
+	defer func() {
+		if delivered {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+		defer cancel()
+		if cred.TokenID != "" {
+			_ = h.Queries.RememberWorkflowRunnerAbandonedEngineToken(ctx, db.RememberWorkflowRunnerAbandonedEngineTokenParams{ID: row.ID, EngineTokenID: cred.TokenID, ExpiresAt: pgtype.Timestamptz{Time: cred.ExpiresAt, Valid: true}})
+		} else {
+			_, _ = h.Queries.RetireWorkflowRunnerGeneration(ctx, db.RetireWorkflowRunnerGenerationParams{WorkspaceID: d.WorkspaceID, DaemonID: d.DaemonID, ID: row.ID, ControlHash: d.ControlHash})
+		}
+		if cred.Token != "" {
+			_ = h.WorkflowControl.Tenants.RevokeWorkerCredentials(ctx, cred)
+		}
+		_ = h.cleanupWorkflowRunnerCredentials(ctx, d.WorkspaceID, d.DaemonID)
+	}()
+	if e != nil || cred.TokenID == "" || cred.TenantID != serverCred.TenantID || !cred.ExpiresAt.After(time.Now()) {
+		workflowDenied(w, 503, "workflow_unavailable")
+		return
+	}
+	tx, q, e = h.lockWorkflowGeneration(r.Context(), d)
+	if e != nil {
+		workflowDenied(w, 401, "workflow_unauthenticated")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	n, e := q.SetWorkflowRunnerEngineToken(r.Context(), db.SetWorkflowRunnerEngineTokenParams{WorkspaceID: d.WorkspaceID, DaemonID: d.DaemonID, ID: row.ID, ControlHash: d.ControlHash, EngineTokenID: cred.TokenID, ExpiresAt: pgtype.Timestamptz{Time: cred.ExpiresAt, Valid: true}})
+	if e != nil || n != 1 || tx.Commit(r.Context()) != nil {
 		workflowDenied(w, 503, "workflow_unavailable")
 		return
 	}
 	delivered = true
-	writeJSON(w, 200, wr.Credentials{WorkspaceID: uuidToString(d.WorkspaceID), TenantID: cred.TenantID, Generation: uuidToString(row.ID), EngineToken: cred.Token, RunnerToken: token, ExpiresAt: row.ExpiresAt.Time})
+	writeJSON(w, 200, wr.Credentials{WorkspaceID: uuidToString(d.WorkspaceID), TenantID: cred.TenantID, Generation: uuidToString(row.ID), EngineToken: cred.Token, RunnerToken: token, ExpiresAt: cred.ExpiresAt})
 }
 func (h *Handler) WorkflowRunnerRevoke(w http.ResponseWriter, r *http.Request) {
 	d, ok := h.authorizeWorkflowControl(w, r)
@@ -249,6 +353,7 @@ func (h *Handler) WorkflowRunnerRevoke(w http.ResponseWriter, r *http.Request) {
 		workflowDenied(w, 503, "workflow_unavailable")
 		return
 	}
+	_ = h.cleanupWorkflowRunnerCredentials(r.Context(), d.WorkspaceID, d.DaemonID)
 	writeJSON(w, 200, map[string]bool{"revoked": true})
 }
 func (h *Handler) WorkflowRunnerAcknowledge(w http.ResponseWriter, r *http.Request) {
@@ -432,6 +537,7 @@ func (h *Handler) WorkflowRunnerRetire(w http.ResponseWriter, r *http.Request) {
 		workflowDenied(w, 503, "workflow_unavailable")
 		return
 	}
+	_ = h.cleanupWorkflowRunnerCredentials(r.Context(), d.WorkspaceID, d.DaemonID)
 	writeJSON(w, 200, map[string]bool{"retired": true})
 }
 func (h *Handler) WorkflowRunnerValidationFailed(w http.ResponseWriter, r *http.Request) {

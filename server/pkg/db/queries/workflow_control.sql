@@ -23,8 +23,8 @@ WHERE r.workspace_id=$1 AND (
  OR EXISTS(SELECT 1 FROM workflow_run run WHERE run.workspace_id=r.workspace_id AND run.revision_id=r.id AND run.status IN ('queued','submitting','running'))
 ) ORDER BY r.workflow_id,r.version LIMIT 257;
 -- name: CreateWorkflowRunnerGeneration :one
-INSERT INTO workflow_runner_token(workspace_id,daemon_id,token_hash,created_by_id,expires_at,control_hash,tenant_id,phase)
-VALUES($1,$2,$3,$4,$5,$6,$7,'candidate') RETURNING *;
+INSERT INTO workflow_runner_token(workspace_id,daemon_id,token_hash,created_by_id,expires_at,control_hash,tenant_id,phase,engine_issuance_unknown)
+VALUES($1,$2,$3,$4,$5,$6,$7,'candidate',FALSE) RETURNING *;
 -- name: AuthorizeWorkflowRunner :one
 SELECT t.* FROM workflow_runner_token t
 JOIN workflow_daemon d ON d.workspace_id=t.workspace_id AND d.daemon_id=t.daemon_id AND d.control_hash=t.control_hash
@@ -56,3 +56,18 @@ UPDATE workflow_runner_token SET phase='current' WHERE workspace_id=$1 AND daemo
 UPDATE workflow_runner_token SET revoked_at=now() WHERE workspace_id=$1 AND daemon_id=$2 AND id=$3 AND control_hash=$4 AND revoked_at IS NULL;
 -- name: DeleteWorkflowDaemonsByWorkspace :exec
 DELETE FROM workflow_daemon WHERE workspace_id=$1;
+-- name: SetWorkflowRunnerEngineToken :execrows
+UPDATE workflow_runner_token SET engine_token_id=$5,expires_at=$6,engine_issuance_unknown=FALSE
+WHERE workspace_id=$1 AND daemon_id=$2 AND id=$3 AND control_hash=$4 AND phase='candidate' AND revoked_at IS NULL AND engine_token_id='';
+-- name: BeginWorkflowRunnerEngineIssuance :execrows
+UPDATE workflow_runner_token SET engine_issuance_unknown=TRUE WHERE id=$1 AND phase='candidate' AND revoked_at IS NULL AND engine_token_id='';
+-- name: WorkflowRunnerIssuancePending :one
+SELECT EXISTS(SELECT 1 FROM workflow_runner_token WHERE workspace_id=$1 AND daemon_id=$2 AND revoked_at IS NULL AND expires_at>now() AND engine_token_id='');
+-- name: ListWorkflowRunnerEngineCleanup :many
+SELECT * FROM workflow_runner_token WHERE revoked_at IS NOT NULL AND engine_token_id<>'' AND engine_revoked_at IS NULL AND expires_at>now() ORDER BY created_at LIMIT 100;
+-- name: ListWorkflowRunnerEngineCleanupForDaemon :many
+SELECT * FROM workflow_runner_token WHERE workspace_id=$1 AND daemon_id=$2 AND revoked_at IS NOT NULL AND (engine_token_id<>'' OR engine_issuance_unknown) AND engine_revoked_at IS NULL AND expires_at>now() ORDER BY created_at;
+-- name: ConfirmWorkflowRunnerEngineRevocation :exec
+UPDATE workflow_runner_token SET engine_revoked_at=now() WHERE id=$1 AND engine_token_id=$2 AND revoked_at IS NOT NULL;
+-- name: RememberWorkflowRunnerAbandonedEngineToken :exec
+UPDATE workflow_runner_token SET engine_token_id=$2,expires_at=$3,revoked_at=COALESCE(revoked_at,now()),engine_issuance_unknown=FALSE WHERE id=$1 AND engine_token_id='';

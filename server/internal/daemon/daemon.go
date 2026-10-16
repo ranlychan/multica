@@ -3003,7 +3003,8 @@ func (d *Daemon) registerRuntimesForWorkspaceBatchLocked(ctx context.Context, wo
 	d.logger.Debug("register response", "workspace_id", workspaceID, "runtimes", len(resp.Runtimes), "repos", len(resp.Repos), "repos_version", resp.ReposVersion)
 	d.recordBuiltinVersionsSent(workspaceID, runtimes)
 	if d.workflow != nil {
-		d.workflow.enroll(workspaceID, resp.WorkflowControlToken)
+		expected, _ := workflowFields["workflow_control_token"].(string)
+		d.workflow.enrollForRegistration(ctx, workspaceID, expected, resp.WorkflowControlToken)
 	}
 	return resp, profileSig, nil
 }
@@ -3056,7 +3057,8 @@ func (d *Daemon) registerBuiltinRuntimesForWorkspaceLocked(ctx context.Context, 
 	d.logger.Debug("builtin register response", "workspace_id", workspaceID, "runtimes", len(resp.Runtimes))
 	d.recordBuiltinVersionsSent(workspaceID, runtimes)
 	if d.workflow != nil {
-		d.workflow.enroll(workspaceID, resp.WorkflowControlToken)
+		expected, _ := workflowFields["workflow_control_token"].(string)
+		d.workflow.enrollForRegistration(ctx, workspaceID, expected, resp.WorkflowControlToken)
 	}
 	return resp, nil
 }

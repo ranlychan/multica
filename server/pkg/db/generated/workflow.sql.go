@@ -865,7 +865,7 @@ func (q *Queries) CreateWorkflowRun(ctx context.Context, arg CreateWorkflowRunPa
 
 const createWorkflowRunnerToken = `-- name: CreateWorkflowRunnerToken :one
 INSERT INTO workflow_runner_token(workspace_id,daemon_id,token_hash,label,created_by_id,expires_at)
-VALUES($1,$2,$3,$4,$5,$6) RETURNING id, workspace_id, daemon_id, token_hash, label, created_by_id, last_used_at, revoked_at, expires_at, created_at, control_hash, tenant_id, registrations, lease_until, phase
+VALUES($1,$2,$3,$4,$5,$6) RETURNING id, workspace_id, daemon_id, token_hash, label, created_by_id, last_used_at, revoked_at, expires_at, created_at, control_hash, tenant_id, registrations, lease_until, phase, engine_token_id, engine_revoked_at, engine_issuance_unknown
 `
 
 type CreateWorkflowRunnerTokenParams struct {
@@ -903,6 +903,9 @@ func (q *Queries) CreateWorkflowRunnerToken(ctx context.Context, arg CreateWorkf
 		&i.Registrations,
 		&i.LeaseUntil,
 		&i.Phase,
+		&i.EngineTokenID,
+		&i.EngineRevokedAt,
+		&i.EngineIssuanceUnknown,
 	)
 	return i, err
 }
@@ -1305,7 +1308,7 @@ func (q *Queries) FinishWorkflowRunWithIncompleteProjection(ctx context.Context,
 }
 
 const getActiveWorkflowRunnerToken = `-- name: GetActiveWorkflowRunnerToken :one
-SELECT id, workspace_id, daemon_id, token_hash, label, created_by_id, last_used_at, revoked_at, expires_at, created_at, control_hash, tenant_id, registrations, lease_until, phase FROM workflow_runner_token WHERE token_hash=$1 AND workspace_id=$2 AND daemon_id=$3 AND revoked_at IS NULL AND expires_at>now()
+SELECT id, workspace_id, daemon_id, token_hash, label, created_by_id, last_used_at, revoked_at, expires_at, created_at, control_hash, tenant_id, registrations, lease_until, phase, engine_token_id, engine_revoked_at, engine_issuance_unknown FROM workflow_runner_token WHERE token_hash=$1 AND workspace_id=$2 AND daemon_id=$3 AND revoked_at IS NULL AND expires_at>now()
 `
 
 type GetActiveWorkflowRunnerTokenParams struct {
@@ -1333,6 +1336,9 @@ func (q *Queries) GetActiveWorkflowRunnerToken(ctx context.Context, arg GetActiv
 		&i.Registrations,
 		&i.LeaseUntil,
 		&i.Phase,
+		&i.EngineTokenID,
+		&i.EngineRevokedAt,
+		&i.EngineIssuanceUnknown,
 	)
 	return i, err
 }

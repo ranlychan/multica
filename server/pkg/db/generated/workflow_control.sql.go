@@ -40,7 +40,7 @@ func (q *Queries) AuthorizeWorkflowControl(ctx context.Context, arg AuthorizeWor
 }
 
 const authorizeWorkflowRunner = `-- name: AuthorizeWorkflowRunner :one
-SELECT t.id, t.workspace_id, t.daemon_id, t.token_hash, t.label, t.created_by_id, t.last_used_at, t.revoked_at, t.expires_at, t.created_at, t.control_hash, t.tenant_id, t.registrations, t.lease_until, t.phase FROM workflow_runner_token t
+SELECT t.id, t.workspace_id, t.daemon_id, t.token_hash, t.label, t.created_by_id, t.last_used_at, t.revoked_at, t.expires_at, t.created_at, t.control_hash, t.tenant_id, t.registrations, t.lease_until, t.phase, t.engine_token_id, t.engine_revoked_at, t.engine_issuance_unknown FROM workflow_runner_token t
 JOIN workflow_daemon d ON d.workspace_id=t.workspace_id AND d.daemon_id=t.daemon_id AND d.control_hash=t.control_hash
 JOIN workspace w ON w.id=d.workspace_id
 JOIN member m ON m.workspace_id=d.workspace_id AND m.user_id=d.owner_id
@@ -74,13 +74,42 @@ func (q *Queries) AuthorizeWorkflowRunner(ctx context.Context, arg AuthorizeWork
 		&i.Registrations,
 		&i.LeaseUntil,
 		&i.Phase,
+		&i.EngineTokenID,
+		&i.EngineRevokedAt,
+		&i.EngineIssuanceUnknown,
 	)
 	return i, err
 }
 
+const beginWorkflowRunnerEngineIssuance = `-- name: BeginWorkflowRunnerEngineIssuance :execrows
+UPDATE workflow_runner_token SET engine_issuance_unknown=TRUE WHERE id=$1 AND phase='candidate' AND revoked_at IS NULL AND engine_token_id=''
+`
+
+func (q *Queries) BeginWorkflowRunnerEngineIssuance(ctx context.Context, id pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, beginWorkflowRunnerEngineIssuance, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const confirmWorkflowRunnerEngineRevocation = `-- name: ConfirmWorkflowRunnerEngineRevocation :exec
+UPDATE workflow_runner_token SET engine_revoked_at=now() WHERE id=$1 AND engine_token_id=$2 AND revoked_at IS NOT NULL
+`
+
+type ConfirmWorkflowRunnerEngineRevocationParams struct {
+	ID            pgtype.UUID `json:"id"`
+	EngineTokenID string      `json:"engine_token_id"`
+}
+
+func (q *Queries) ConfirmWorkflowRunnerEngineRevocation(ctx context.Context, arg ConfirmWorkflowRunnerEngineRevocationParams) error {
+	_, err := q.db.Exec(ctx, confirmWorkflowRunnerEngineRevocation, arg.ID, arg.EngineTokenID)
+	return err
+}
+
 const createWorkflowRunnerGeneration = `-- name: CreateWorkflowRunnerGeneration :one
-INSERT INTO workflow_runner_token(workspace_id,daemon_id,token_hash,created_by_id,expires_at,control_hash,tenant_id,phase)
-VALUES($1,$2,$3,$4,$5,$6,$7,'candidate') RETURNING id, workspace_id, daemon_id, token_hash, label, created_by_id, last_used_at, revoked_at, expires_at, created_at, control_hash, tenant_id, registrations, lease_until, phase
+INSERT INTO workflow_runner_token(workspace_id,daemon_id,token_hash,created_by_id,expires_at,control_hash,tenant_id,phase,engine_issuance_unknown)
+VALUES($1,$2,$3,$4,$5,$6,$7,'candidate',FALSE) RETURNING id, workspace_id, daemon_id, token_hash, label, created_by_id, last_used_at, revoked_at, expires_at, created_at, control_hash, tenant_id, registrations, lease_until, phase, engine_token_id, engine_revoked_at, engine_issuance_unknown
 `
 
 type CreateWorkflowRunnerGenerationParams struct {
@@ -120,6 +149,9 @@ func (q *Queries) CreateWorkflowRunnerGeneration(ctx context.Context, arg Create
 		&i.Registrations,
 		&i.LeaseUntil,
 		&i.Phase,
+		&i.EngineTokenID,
+		&i.EngineRevokedAt,
+		&i.EngineIssuanceUnknown,
 	)
 	return i, err
 }
@@ -193,7 +225,7 @@ func (q *Queries) EnrollWorkflowDaemon(ctx context.Context, arg EnrollWorkflowDa
 }
 
 const getWorkflowRunnerGeneration = `-- name: GetWorkflowRunnerGeneration :one
-SELECT id, workspace_id, daemon_id, token_hash, label, created_by_id, last_used_at, revoked_at, expires_at, created_at, control_hash, tenant_id, registrations, lease_until, phase FROM workflow_runner_token WHERE workspace_id=$1 AND daemon_id=$2 AND id=$3 AND control_hash=$4 AND revoked_at IS NULL AND expires_at>now()
+SELECT id, workspace_id, daemon_id, token_hash, label, created_by_id, last_used_at, revoked_at, expires_at, created_at, control_hash, tenant_id, registrations, lease_until, phase, engine_token_id, engine_revoked_at, engine_issuance_unknown FROM workflow_runner_token WHERE workspace_id=$1 AND daemon_id=$2 AND id=$3 AND control_hash=$4 AND revoked_at IS NULL AND expires_at>now()
 `
 
 type GetWorkflowRunnerGenerationParams struct {
@@ -227,6 +259,9 @@ func (q *Queries) GetWorkflowRunnerGeneration(ctx context.Context, arg GetWorkfl
 		&i.Registrations,
 		&i.LeaseUntil,
 		&i.Phase,
+		&i.EngineTokenID,
+		&i.EngineRevokedAt,
+		&i.EngineIssuanceUnknown,
 	)
 	return i, err
 }
@@ -256,6 +291,97 @@ func (q *Queries) LeaseWorkflowRunnerGeneration(ctx context.Context, arg LeaseWo
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const listWorkflowRunnerEngineCleanup = `-- name: ListWorkflowRunnerEngineCleanup :many
+SELECT id, workspace_id, daemon_id, token_hash, label, created_by_id, last_used_at, revoked_at, expires_at, created_at, control_hash, tenant_id, registrations, lease_until, phase, engine_token_id, engine_revoked_at, engine_issuance_unknown FROM workflow_runner_token WHERE revoked_at IS NOT NULL AND engine_token_id<>'' AND engine_revoked_at IS NULL AND expires_at>now() ORDER BY created_at LIMIT 100
+`
+
+func (q *Queries) ListWorkflowRunnerEngineCleanup(ctx context.Context) ([]WorkflowRunnerToken, error) {
+	rows, err := q.db.Query(ctx, listWorkflowRunnerEngineCleanup)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []WorkflowRunnerToken{}
+	for rows.Next() {
+		var i WorkflowRunnerToken
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.DaemonID,
+			&i.TokenHash,
+			&i.Label,
+			&i.CreatedByID,
+			&i.LastUsedAt,
+			&i.RevokedAt,
+			&i.ExpiresAt,
+			&i.CreatedAt,
+			&i.ControlHash,
+			&i.TenantID,
+			&i.Registrations,
+			&i.LeaseUntil,
+			&i.Phase,
+			&i.EngineTokenID,
+			&i.EngineRevokedAt,
+			&i.EngineIssuanceUnknown,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listWorkflowRunnerEngineCleanupForDaemon = `-- name: ListWorkflowRunnerEngineCleanupForDaemon :many
+SELECT id, workspace_id, daemon_id, token_hash, label, created_by_id, last_used_at, revoked_at, expires_at, created_at, control_hash, tenant_id, registrations, lease_until, phase, engine_token_id, engine_revoked_at, engine_issuance_unknown FROM workflow_runner_token WHERE workspace_id=$1 AND daemon_id=$2 AND revoked_at IS NOT NULL AND (engine_token_id<>'' OR engine_issuance_unknown) AND engine_revoked_at IS NULL AND expires_at>now() ORDER BY created_at
+`
+
+type ListWorkflowRunnerEngineCleanupForDaemonParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	DaemonID    string      `json:"daemon_id"`
+}
+
+func (q *Queries) ListWorkflowRunnerEngineCleanupForDaemon(ctx context.Context, arg ListWorkflowRunnerEngineCleanupForDaemonParams) ([]WorkflowRunnerToken, error) {
+	rows, err := q.db.Query(ctx, listWorkflowRunnerEngineCleanupForDaemon, arg.WorkspaceID, arg.DaemonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []WorkflowRunnerToken{}
+	for rows.Next() {
+		var i WorkflowRunnerToken
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.DaemonID,
+			&i.TokenHash,
+			&i.Label,
+			&i.CreatedByID,
+			&i.LastUsedAt,
+			&i.RevokedAt,
+			&i.ExpiresAt,
+			&i.CreatedAt,
+			&i.ControlHash,
+			&i.TenantID,
+			&i.Registrations,
+			&i.LeaseUntil,
+			&i.Phase,
+			&i.EngineTokenID,
+			&i.EngineRevokedAt,
+			&i.EngineIssuanceUnknown,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listWorkflowRunnerRevisions = `-- name: ListWorkflowRunnerRevisions :many
@@ -351,6 +477,21 @@ func (q *Queries) PromoteWorkflowRunnerCandidate(ctx context.Context, arg Promot
 	return result.RowsAffected(), nil
 }
 
+const rememberWorkflowRunnerAbandonedEngineToken = `-- name: RememberWorkflowRunnerAbandonedEngineToken :exec
+UPDATE workflow_runner_token SET engine_token_id=$2,expires_at=$3,revoked_at=COALESCE(revoked_at,now()),engine_issuance_unknown=FALSE WHERE id=$1 AND engine_token_id=''
+`
+
+type RememberWorkflowRunnerAbandonedEngineTokenParams struct {
+	ID            pgtype.UUID        `json:"id"`
+	EngineTokenID string             `json:"engine_token_id"`
+	ExpiresAt     pgtype.Timestamptz `json:"expires_at"`
+}
+
+func (q *Queries) RememberWorkflowRunnerAbandonedEngineToken(ctx context.Context, arg RememberWorkflowRunnerAbandonedEngineTokenParams) error {
+	_, err := q.db.Exec(ctx, rememberWorkflowRunnerAbandonedEngineToken, arg.ID, arg.EngineTokenID, arg.ExpiresAt)
+	return err
+}
+
 const retireWorkflowRunnerGeneration = `-- name: RetireWorkflowRunnerGeneration :execrows
 UPDATE workflow_runner_token SET revoked_at=now() WHERE workspace_id=$1 AND daemon_id=$2 AND id=$3 AND control_hash=$4 AND revoked_at IS NULL
 `
@@ -389,6 +530,35 @@ func (q *Queries) RevokeWorkflowCandidateAndExpiredGenerations(ctx context.Conte
 	return err
 }
 
+const setWorkflowRunnerEngineToken = `-- name: SetWorkflowRunnerEngineToken :execrows
+UPDATE workflow_runner_token SET engine_token_id=$5,expires_at=$6,engine_issuance_unknown=FALSE
+WHERE workspace_id=$1 AND daemon_id=$2 AND id=$3 AND control_hash=$4 AND phase='candidate' AND revoked_at IS NULL AND engine_token_id=''
+`
+
+type SetWorkflowRunnerEngineTokenParams struct {
+	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
+	DaemonID      string             `json:"daemon_id"`
+	ID            pgtype.UUID        `json:"id"`
+	ControlHash   string             `json:"control_hash"`
+	EngineTokenID string             `json:"engine_token_id"`
+	ExpiresAt     pgtype.Timestamptz `json:"expires_at"`
+}
+
+func (q *Queries) SetWorkflowRunnerEngineToken(ctx context.Context, arg SetWorkflowRunnerEngineTokenParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setWorkflowRunnerEngineToken,
+		arg.WorkspaceID,
+		arg.DaemonID,
+		arg.ID,
+		arg.ControlHash,
+		arg.EngineTokenID,
+		arg.ExpiresAt,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const workflowRunnerEligible = `-- name: WorkflowRunnerEligible :one
 SELECT EXISTS(SELECT 1 FROM workflow_runner_token t
 JOIN workflow_daemon d ON d.workspace_id=t.workspace_id AND d.daemon_id=t.daemon_id AND d.control_hash=t.control_hash
@@ -404,6 +574,22 @@ type WorkflowRunnerEligibleParams struct {
 
 func (q *Queries) WorkflowRunnerEligible(ctx context.Context, arg WorkflowRunnerEligibleParams) (bool, error) {
 	row := q.db.QueryRow(ctx, workflowRunnerEligible, arg.WorkspaceID, arg.RevisionID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const workflowRunnerIssuancePending = `-- name: WorkflowRunnerIssuancePending :one
+SELECT EXISTS(SELECT 1 FROM workflow_runner_token WHERE workspace_id=$1 AND daemon_id=$2 AND revoked_at IS NULL AND expires_at>now() AND engine_token_id='')
+`
+
+type WorkflowRunnerIssuancePendingParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	DaemonID    string      `json:"daemon_id"`
+}
+
+func (q *Queries) WorkflowRunnerIssuancePending(ctx context.Context, arg WorkflowRunnerIssuancePendingParams) (bool, error) {
+	row := q.db.QueryRow(ctx, workflowRunnerIssuancePending, arg.WorkspaceID, arg.DaemonID)
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err

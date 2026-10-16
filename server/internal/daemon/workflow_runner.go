@@ -139,6 +139,9 @@ func (r *WorkflowRunner) Validate(ctx context.Context, source string) (wr.Valida
 	}
 }
 func (r *WorkflowRunner) Start(ctx context.Context, d wr.Descriptor) (*WorkflowProcess, wr.Message, error) {
+	return r.startWorker(ctx, ctx, d)
+}
+func (r *WorkflowRunner) startWorker(ctx, readyCtx context.Context, d wr.Descriptor) (*WorkflowProcess, wr.Message, error) {
 	p, err := r.start(ctx, map[string]any{"mode": "worker", "descriptor": d})
 	if err != nil {
 		return nil, wr.Message{}, err
@@ -148,7 +151,7 @@ func (r *WorkflowRunner) Start(ctx context.Context, d wr.Descriptor) (*WorkflowP
 		if ok && m.Type == "ready" && m.Protocol == 1 && m.WorkspaceID == d.WorkspaceID && m.Generation == d.Generation && m.TenantID == d.TenantID {
 			return p, m, nil
 		}
-	case <-ctx.Done():
+	case <-readyCtx.Done():
 	case <-time.After(25 * time.Second):
 	}
 	p.Stop(time.Second)

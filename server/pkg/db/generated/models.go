@@ -1838,21 +1838,24 @@ type WorkflowRun struct {
 }
 
 type WorkflowRunnerToken struct {
-	ID            pgtype.UUID        `json:"id"`
-	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
-	DaemonID      string             `json:"daemon_id"`
-	TokenHash     string             `json:"token_hash"`
-	Label         pgtype.Text        `json:"label"`
-	CreatedByID   pgtype.UUID        `json:"created_by_id"`
-	LastUsedAt    pgtype.Timestamptz `json:"last_used_at"`
-	RevokedAt     pgtype.Timestamptz `json:"revoked_at"`
-	ExpiresAt     pgtype.Timestamptz `json:"expires_at"`
-	CreatedAt     pgtype.Timestamptz `json:"created_at"`
-	ControlHash   string             `json:"control_hash"`
-	TenantID      string             `json:"tenant_id"`
-	Registrations []byte             `json:"registrations"`
-	LeaseUntil    pgtype.Timestamptz `json:"lease_until"`
-	Phase         string             `json:"phase"`
+	ID                    pgtype.UUID        `json:"id"`
+	WorkspaceID           pgtype.UUID        `json:"workspace_id"`
+	DaemonID              string             `json:"daemon_id"`
+	TokenHash             string             `json:"token_hash"`
+	Label                 pgtype.Text        `json:"label"`
+	CreatedByID           pgtype.UUID        `json:"created_by_id"`
+	LastUsedAt            pgtype.Timestamptz `json:"last_used_at"`
+	RevokedAt             pgtype.Timestamptz `json:"revoked_at"`
+	ExpiresAt             pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	ControlHash           string             `json:"control_hash"`
+	TenantID              string             `json:"tenant_id"`
+	Registrations         []byte             `json:"registrations"`
+	LeaseUntil            pgtype.Timestamptz `json:"lease_until"`
+	Phase                 string             `json:"phase"`
+	EngineTokenID         string             `json:"engine_token_id"`
+	EngineRevokedAt       pgtype.Timestamptz `json:"engine_revoked_at"`
+	EngineIssuanceUnknown bool               `json:"engine_issuance_unknown"`
 }
 
 type WorkflowTrigger struct {
