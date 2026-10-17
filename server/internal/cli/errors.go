@@ -634,6 +634,22 @@ func ServerErrorCode(err error) string {
 	return parsed.Code
 }
 
+// WorkflowRequestError retains HTTP status/task-token classification while
+// making stable workflow refusals and their recovery visible to CLI operators.
+func WorkflowRequestError(err error) error {
+	code := ServerErrorCode(err)
+	switch code {
+	case "workflow_version_conflict":
+		return WithUserMessage(code+": inspect workflow get and reconcile the latest state before intentionally retrying with a new expected value.", err)
+	case "workflow_no_originator":
+		return WithUserMessage(code+": this agent task has no current human originator authorized for this action; stop and ask the requesting human.", err)
+	case "workflow_engine_unavailable", "workflow_unrunnable":
+		return WithUserMessage(code+": inspect workflow publication, runtime eligibility, and persisted run history before requesting another run.", err)
+	default:
+		return err
+	}
+}
+
 // looksLikeMachineCode reports whether s is a bare identifier such as
 // "cursor_query_mismatch" rather than a sentence meant for a person. The test
 // is deliberately narrow — lowercase word characters only — so that ordinary

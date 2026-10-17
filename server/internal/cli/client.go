@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -393,6 +394,20 @@ func (c *APIClient) PostJSON(ctx context.Context, path string, body any, out any
 		return nil
 	}
 	return wrapBodyRead(req, json.NewDecoder(resp.Body).Decode(out))
+}
+
+// PublishWorkflowRevision submits exact source and the locally extracted graph.
+// Publication is asynchronous; only a trusted daemon may acknowledge validation.
+func (c *APIClient) PublishWorkflowRevision(ctx context.Context, id string, expectedVersion int32, source string, graph any, out any) error {
+	return c.PostJSON(ctx, "/api/workflows/"+url.PathEscape(id)+"/revisions", map[string]any{
+		"expected_version": expectedVersion, "definition": source, "definition_graph": graph,
+	}, out)
+}
+
+// WorkflowTriggerURL contains a bearer secret. Call only for explicit one-time
+// disclosure, never for ordinary reads, diagnostics, or errors.
+func (c *APIClient) WorkflowTriggerURL(token string) string {
+	return c.BaseURL + "/api/workflow-triggers/" + url.PathEscape(token)
 }
 
 // PutJSON performs a PUT request with a JSON body.
