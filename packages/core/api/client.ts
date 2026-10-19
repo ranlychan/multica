@@ -1,4 +1,6 @@
 import type { ZodType } from "zod";
+import { WorkflowSchema, WorkflowRevisionSchema, WorkflowRunSchema, WorkflowLogsSchema, WorkflowTriggerSchema } from "./schema";
+import type { Workflow, WorkflowRevision, WorkflowRun, WorkflowLogs, WorkflowTrigger } from "../types/workflow";
 import type { IssueWakeup, IssueWakeupInput, IssueWakeupSummaryRow, PausedWakeup, SystemWakeup, WakeupRun, WorkspaceSystemWakeup } from "../types/issue-wakeup";
 import type { WorkspaceWakeupPage, WorkspaceWakeupFilters } from "../types/issue-wakeup";
 import { WorkspaceWakeupPageSchema, IssueWakeupSchema, IssueWakeupSummaryRowSchema, PausedWakeupSchema, SystemWakeupSchema, WakeupRunSchema, WorkspaceSystemWakeupSchema } from "./schemas";
@@ -4551,6 +4553,36 @@ export class ApiClient {
   }
 
   // Autopilots
+  async listWorkflows(offset = 0): Promise<Workflow[]> {
+    return parseWithFallback(await this.fetch<unknown>(`/api/workflows?limit=25&offset=${offset}`), WorkflowSchema.array(), [], { endpoint: "GET /api/workflows" });
+  }
+  async getWorkflow(id: string): Promise<Workflow | null> {
+    return parseWithFallback(await this.fetch<unknown>(`/api/workflows/${id}`), WorkflowSchema, null, { endpoint: "GET /api/workflows/:id" });
+  }
+  async listWorkflowRevisions(id: string, offset = 0): Promise<WorkflowRevision[]> {
+    return parseWithFallback(await this.fetch<unknown>(`/api/workflows/${id}/revisions?limit=25&offset=${offset}`), WorkflowRevisionSchema.array(), [], { endpoint: "GET /api/workflows/:id/revisions" });
+  }
+  async getWorkflowRevision(id: string, revisionId: string): Promise<WorkflowRevision | null> {
+    return parseWithFallback(await this.fetch<unknown>(`/api/workflows/${id}/revisions/${revisionId}`), WorkflowRevisionSchema, null, { endpoint: "GET /api/workflows/:id/revisions/:revisionId" });
+  }
+  async listWorkflowTriggers(id: string): Promise<WorkflowTrigger[]> {
+    return parseWithFallback(await this.fetch<unknown>(`/api/workflows/${id}/triggers`), WorkflowTriggerSchema.array(), [], { endpoint: "GET /api/workflows/:id/triggers" });
+  }
+  async listWorkflowRuns(id: string, offset = 0): Promise<WorkflowRun[]> {
+    return parseWithFallback(await this.fetch<unknown>(`/api/workflows/${id}/runs?limit=25&offset=${offset}`), WorkflowRunSchema.array(), [], { endpoint: "GET /api/workflows/:id/runs" });
+  }
+  async getWorkflowRun(id: string, runId: string): Promise<WorkflowRun | null> {
+    return parseWithFallback(await this.fetch<unknown>(`/api/workflows/${id}/runs/${runId}`), WorkflowRunSchema, null, { endpoint: "GET /api/workflows/:id/runs/:runId" });
+  }
+  async getWorkflowLogs(id: string, runId: string, offset = 0): Promise<WorkflowLogs | null> {
+    return parseWithFallback(await this.fetch<unknown>(`/api/workflows/${id}/runs/${runId}/logs?limit=25&offset=${offset}`), WorkflowLogsSchema, null, { endpoint: "GET /api/workflows/:id/runs/:runId/logs" });
+  }
+  async workflowRunAction(id: string, runId: string, action: "cancel" | "replay"): Promise<WorkflowRun> {
+    const result = parseWithFallback<WorkflowRun | null>(await this.fetch<unknown>(`/api/workflows/${id}/runs/${runId}/${action}`, { method: "POST" }), WorkflowRunSchema, null, { endpoint: `POST /api/workflows/:id/runs/:runId/${action}` });
+    if (!result) throw new Error("workflow_invalid_response");
+    return result;
+  }
+
   async listAutopilots(params?: { status?: string }): Promise<ListAutopilotsResponse> {
     const search = new URLSearchParams();
     if (params?.status) search.set("status", params.status);

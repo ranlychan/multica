@@ -134,7 +134,7 @@ func (s *WorkflowService) SubmitRun(ctx context.Context, intent RunIntent) (db.W
 		}
 	}
 	if r.CancelRequestedAt.Valid {
-		if r.Status == "queued" && !r.SubmissionStartedAt.Valid {
+		if (r.Status == "queued" && !r.SubmissionStartedAt.Valid) || (r.Status == "submitting" && r.SubmissionAttempts == 0 && !r.HatchetRunID.Valid) {
 			result, e := s.Queries.CancelUnsubmittedWorkflowRun(ctx, db.CancelUnsubmittedWorkflowRunParams{ID: r.ID, WorkspaceID: r.WorkspaceID})
 			if errors.Is(e, pgx.ErrNoRows) {
 				return r, nil

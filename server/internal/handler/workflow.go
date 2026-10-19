@@ -213,7 +213,8 @@ func (h *Handler) ListWorkflows(w http.ResponseWriter, r *http.Request) {
 		workflowAPIError(w, workflowFail("workflow_not_found"))
 		return
 	}
-	if _, ok := h.workflowActor(w, r, ws); !ok {
+	actor, ok := h.workflowActor(w, r, ws)
+	if !ok {
 		return
 	}
 	limit, offset, ok := workflowPage(w, r)
@@ -225,13 +226,56 @@ func (h *Handler) ListWorkflows(w http.ResponseWriter, r *http.Request) {
 		workflowAPIError(w, e)
 		return
 	}
-	writeJSON(w, 200, entities)
+	views := make([]any, 0, len(entities))
+	for _, entity := range entities {
+		view, err := h.workflowSummary(r, entity, actor)
+		if err != nil {
+			workflowAPIError(w, err)
+			return
+		}
+		views = append(views, view)
+	}
+	writeJSON(w, 200, views)
 }
 func (h *Handler) GetWorkflow(w http.ResponseWriter, r *http.Request) {
-	entity, _, ok := h.workflowResource(w, r, false, false)
+	entity, actor, ok := h.workflowResource(w, r, false, false)
 	if ok {
-		writeJSON(w, 200, entity)
+		view, err := h.workflowSummary(r, entity, actor)
+		if err != nil {
+			workflowAPIError(w, err)
+			return
+		}
+		writeJSON(w, 200, view)
 	}
+}
+
+func (h *Handler) workflowSummary(r *http.Request, entity db.Workflow, actor service.WorkflowActor) (any, error) {
+	summary, err := h.Queries.WorkflowTriggerSummary(r.Context(), db.WorkflowTriggerSummaryParams{WorkflowID: entity.ID, WorkspaceID: entity.WorkspaceID})
+	if err != nil {
+		return nil, err
+	}
+	state := "unrunnable"
+	svc := h.WorkflowSvc
+	if svc.Ready == nil || (svc.Enabled != nil && !svc.Enabled()) {
+		state = "disabled"
+	} else if !svc.Ready() {
+		state = "unavailable"
+	} else if entity.Status == "active" && entity.CurrentRevisionID.Valid {
+		rev, e := h.Queries.GetWorkflowRevisionInWorkspace(r.Context(), db.GetWorkflowRevisionInWorkspaceParams{ID: entity.CurrentRevisionID, WorkspaceID: entity.WorkspaceID})
+		if e != nil {
+			return nil, e
+		}
+		if rev.WorkflowID == entity.ID && rev.ValidationStatus == "valid" && rev.PublishedAt.Valid && svc.Eligible != nil && svc.Eligible(r.Context(), entity.WorkspaceID, rev.ID) {
+			state = "ready"
+		}
+	}
+	return struct {
+		db.Workflow
+		CanWrite            bool              `json:"can_write"`
+		RuntimeAvailability map[string]string `json:"runtime_availability"`
+		TriggerKinds        []string          `json:"trigger_kinds"`
+		NextRunAt           any               `json:"next_run_at"`
+	}{entity, svc.Authorize(r.Context(), entity, actor, false) == nil, map[string]string{"state": state}, summary.Kinds, summary.NextRunAt}, nil
 }
 func (h *Handler) UpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	entity, _, ok := h.workflowResource(w, r, true, false)

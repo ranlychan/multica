@@ -248,6 +248,17 @@ func TestStartDshProfileProvision_RunsAtMostOnce(t *testing.T) {
 		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
 		workspaces: map[string]*workspaceState{"ws-1": {}},
 	}
+	deadline := time.Now().Add(10 * time.Second)
+	// The fixture records argv before writing the profile. Join the owned
+	// install before TempDir/environment cleanup, including on early failure.
+	t.Cleanup(func() {
+		for d.dshInstallInFlight.Load() && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if d.dshInstallInFlight.Load() {
+			t.Error("the profile install did not finish before fixture cleanup")
+		}
+	})
 	if !d.startDshProfileProvision(dshPath) {
 		t.Fatal("first call did not start the install")
 	}
@@ -255,7 +266,6 @@ func TestStartDshProfileProvision_RunsAtMostOnce(t *testing.T) {
 		t.Fatal("second call started another install; the guard is per-round instead of per-daemon")
 	}
 
-	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if strings.Contains(readRecord(t, record), "plugin --profile multica add") {
 			return

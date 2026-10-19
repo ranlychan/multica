@@ -44,6 +44,7 @@ type WorkflowService struct {
 	Queries   *db.Queries
 	TxStarter TxStarter
 	Ready     func() bool
+	Enabled   func() bool
 	Logs      WorkflowLogReader
 	Eligible  func(context.Context, pgtype.UUID, pgtype.UUID) bool
 	Engine    WorkflowEngine

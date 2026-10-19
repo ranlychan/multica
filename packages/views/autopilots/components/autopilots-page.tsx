@@ -51,6 +51,7 @@ import {
   TabsContent,
 } from "@multica/ui/components/ui/tabs";
 import { WorkspaceWakeupCreate, WorkspaceWakeups } from "./workspace-wakeups";
+import { WorkflowList } from "../../workflows";
 import { useNavigation, useRowLink } from "../../navigation";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { formatInTimeZone } from "../../common/format-in-time-zone";
@@ -622,7 +623,7 @@ function LoadingSkeleton() {
 export function AutopilotsPage() {
   const navigation = useNavigation();
   const tab =
-    navigation.searchParams.get("tab") === "wakeups" ? "wakeups" : "autopilots";
+    navigation.searchParams.get("tab") === "workflows" ? "workflows" : navigation.searchParams.get("tab") === "wakeups" ? "wakeups" : "autopilots";
   const { t } = useT("autopilots");
   const locale = useLocale();
   const wsId = useWorkspaceId();
@@ -797,7 +798,7 @@ export function AutopilotsPage() {
       value={tab}
       onValueChange={(value) => {
         const params = new URLSearchParams(navigation.searchParams);
-        if (value === "wakeups") params.set("tab", "wakeups");
+        if (value === "wakeups" || value === "workflows") params.set("tab", value);
         else params.delete("tab");
         navigation.replace(
           `${navigation.pathname}${params.size ? `?${params}` : ""}${navigation.hash}`,
@@ -816,13 +817,13 @@ export function AutopilotsPage() {
               label={t(($) => $.page.new_autopilot)}
               onClick={() => openCreate()}
             />
-          ) : (
+          ) : tab === "wakeups" ? (
             <CollectionPageHeaderAction
               icon={Plus}
               label={t(($) => $.wakeups.create)}
               onClick={() => setWakeupCreateOpen(true)}
             />
-          )
+          ) : undefined
         }
       />
 
@@ -830,8 +831,12 @@ export function AutopilotsPage() {
         <TabsList variant="line" aria-label={t(($) => $.page.title)}>
           <TabsTrigger value="autopilots">{t(($) => $.page.title)}</TabsTrigger>
           <TabsTrigger value="wakeups">{t(($) => $.wakeups.title)}</TabsTrigger>
+          <TabsTrigger value="workflows">{t(($) => $.workflows.title)}</TabsTrigger>
         </TabsList>
       </div>
+      <TabsContent value="workflows" className="flex min-h-0 flex-col data-hidden:hidden">
+        {tab === "workflows" && <WorkflowList key={wsId} />}
+      </TabsContent>
       <TabsContent
         value="wakeups"
         className="flex min-h-0 flex-col data-hidden:hidden"

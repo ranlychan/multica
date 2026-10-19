@@ -730,6 +730,7 @@ func main() {
 		LLMMaxRetries:       llmMaxRetries,
 		LLMDisableThinking:  llmDisableThinking,
 	})
+	h.WorkflowSvc.Enabled = func() bool { return hatchetConfig.Enabled }
 	if err := wireWorkflowRuntime(h.WorkflowSvc, hatchetSupervisor, hatchetTenants, hatchetConfig.APIURL); err != nil {
 		slog.Error("workflow runtime configuration failed")
 		os.Exit(1)

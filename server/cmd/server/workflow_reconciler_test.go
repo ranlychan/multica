@@ -769,6 +769,50 @@ func TestWorkflowReconcileMarksOnlyAttemptedRowsAcrossTimeoutRestarts(t *testing
 	}
 }
 
+func TestWorkflowCancelAfterBeginBeforeAttempt(t *testing.T) {
+	for _, direct := range []bool{false, true} {
+		t.Run(map[bool]string{false: "reconcile", true: "submit"}[direct], func(t *testing.T) {
+			s, w, _ := workflowRuntimeFixture(t)
+			ctx := context.Background()
+			engine := &workflowEngineFixture{accepted: map[string]string{}, status: "RUNNING"}
+			s.Engine = engine
+			runs, err := s.ClaimScheduledRuns(ctx, w.WorkspaceID, time.Now(), 100)
+			if err != nil || len(runs) != 1 {
+				t.Fatalf("claim: %d %v", len(runs), err)
+			}
+			now, err := s.Queries.WorkflowDatabaseTime(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			begun, err := s.Queries.BeginWorkflowRunSubmission(ctx, db.BeginWorkflowRunSubmissionParams{ID: runs[0].ID, WorkspaceID: w.WorkspaceID, SubmissionStartedAt: now, SubmissionDeadline: pgtype.Timestamptz{Time: now.Time.Add(time.Hour), Valid: true}})
+			if err != nil || begun.SubmissionAttempts != 0 || begun.HatchetRunID.Valid {
+				t.Fatalf("begin: %+v %v", begun, err)
+			}
+			cancelled, err := s.Cancel(ctx, w, service.WorkflowActor{HumanID: begun.PrincipalUserID}, begun.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < 2; i++ {
+				if direct {
+					_, err = s.SubmitRun(ctx, service.RunIntent{RunID: begun.ID, WorkspaceID: w.WorkspaceID})
+				} else {
+					err = s.ReconcileRuns(ctx, w.WorkspaceID, 100)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := s.Queries.GetWorkflowRunInWorkspace(ctx, db.GetWorkflowRunInWorkspaceParams{ID: begun.ID, WorkspaceID: w.WorkspaceID})
+			if err != nil || got.Status != "cancelled" || !got.FinishedAt.Valid || got.SubmissionAttempts != 0 || got.HatchetRunID.Valid || got.CancelRequestedByID != cancelled.CancelRequestedByID || !got.CancelRequestedAt.Time.Equal(cancelled.CancelRequestedAt.Time) || !got.SubmissionStartedAt.Time.Equal(begun.SubmissionStartedAt.Time) || !got.SubmissionDeadline.Time.Equal(begun.SubmissionDeadline.Time) {
+				t.Fatalf("zero-attempt cancellation failed or changed admission evidence: status=%s attempts=%d err=%v", got.Status, got.SubmissionAttempts, err)
+			}
+			if engine.submissions != 0 || engine.discoveries != 0 || engine.cancelled {
+				t.Fatal("unsubmitted cancellation contacted engine")
+			}
+		})
+	}
+}
+
 func TestWorkflowReconcileOutageExpiryAndCancellation(t *testing.T) {
 	for _, kind := range []string{"outage", "expired", "cancel_queued", "cancel_ambiguous"} {
 		t.Run(kind, func(t *testing.T) {

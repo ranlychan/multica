@@ -53,6 +53,10 @@ AND r.version>w.definition_version RETURNING w.*;
 UPDATE workflow_revision SET published_at=now() WHERE id=$1 AND workspace_id=$2 AND validation_status='valid';
 -- name: ListWorkflowTriggers :many
 SELECT * FROM workflow_trigger WHERE workflow_id=$1 AND workspace_id=$2 ORDER BY created_at;
+-- name: WorkflowTriggerSummary :one
+SELECT COALESCE(array_agg(DISTINCT kind), ARRAY[]::text[])::text[] AS kinds,
+ min(next_run_at) FILTER (WHERE enabled AND kind='schedule') AS next_run_at
+FROM workflow_trigger WHERE workflow_id=$1 AND workspace_id=$2;
 -- name: GetWorkflowTriggerInWorkspace :one
 SELECT * FROM workflow_trigger WHERE id=$1 AND workspace_id=$2;
 -- name: GetWorkflowTriggerByTokenHash :one
@@ -121,7 +125,10 @@ AND (r.submission_lease_until IS NULL OR r.submission_lease_until<=now())
 AND EXISTS (SELECT 1 FROM member m WHERE m.workspace_id=r.workspace_id AND m.user_id=r.principal_user_id) RETURNING *;
 -- name: CancelUnsubmittedWorkflowRun :one
 UPDATE workflow_run SET status='cancelled',finished_at=now()
-WHERE id=$1 AND workspace_id=$2 AND status='queued' AND submission_started_at IS NULL AND cancel_requested_at IS NOT NULL RETURNING *;
+WHERE id=$1 AND workspace_id=$2 AND
+ ((status='queued' AND submission_started_at IS NULL) OR
+  (status='submitting' AND submission_attempts=0 AND hatchet_run_id IS NULL))
+AND cancel_requested_at IS NOT NULL RETURNING *;
 -- name: ProjectWorkflowRun :one
 UPDATE workflow_run SET log_projection=$3,step_projection=$4
 WHERE id=$1 AND workspace_id=$2 AND status='running' AND pending_terminal_status IS NULL

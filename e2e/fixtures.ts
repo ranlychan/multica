@@ -441,6 +441,15 @@ export class TestApiClient {
     return this.token;
   }
 
+  /** Exercise an endpoint with this test's authenticated workspace context. */
+  async requestJson(path: string, init?: RequestInit) {
+    const response = await this.authedFetch(path, init);
+    if (!response.ok) {
+      throw new Error(`${init?.method ?? "GET"} ${path}: ${response.status} ${await response.text()}`);
+    }
+    return response.status === 204 ? null : response.json();
+  }
+
   getEmail() {
     if (!this.email) {
       throw new Error("Test API client is not logged in");

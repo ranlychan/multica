@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/middleware"
 	"github.com/multica-ai/multica/server/internal/service"
@@ -37,6 +38,54 @@ func TestWorkflowHTTPMiddlewareRejectsForgedAgentIdentity(t *testing.T) {
 	dbfx.Cleanup(t, "DELETE FROM workflow WHERE id=$1", result.ID)
 	if result.CreatedByID != human || result.AuditType != "member" {
 		t.Fatal("forged agent headers accepted")
+	}
+}
+
+func TestWorkflowHTTPObservabilityAuthorityAndAvailability(t *testing.T) {
+	human := plainMember(t, "workflow-observer-author")
+	reader := plainMember(t, "workflow-observer-reader")
+	caller := actingCaller{authUserID: human}
+	var created struct {
+		ID string `json:"id"`
+	}
+	testutil.Call(t, testHandler.CreateWorkflow, caller.request("POST", "/api/workflows", map[string]any{"name": "observable", "slug": "observable"})).Want(201).JSON(&created)
+	dbfx.Cleanup(t, "DELETE FROM workflow WHERE id=$1", created.ID)
+	dbfx.Cleanup(t, "DELETE FROM workflow_revision WHERE workflow_id=$1", created.ID)
+	ws, _ := util.ParseUUID(testWorkspaceID)
+	wid, _ := util.ParseUUID(created.ID)
+	hid, _ := util.ParseUUID(human)
+	pub, err := testHandler.WorkflowSvc.PublishRevision(context.Background(), ws, wid, service.WorkflowActor{HumanID: hid}, 0, "export default {}", json.RawMessage(`{"steps":[{"id":"one"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = testHandler.WorkflowSvc.AcknowledgeRevision(context.Background(), ws, pub.Revision.ID, pub.Revision.DefinitionHash, true); err != nil {
+		t.Fatal(err)
+	}
+	svc := testHandler.WorkflowSvc
+	oldReady, oldEligible := svc.Ready, svc.Eligible
+	t.Cleanup(func() { svc.Ready, svc.Eligible = oldReady, oldEligible })
+	for _, tc := range []struct {
+		name, user, state      string
+		ready, eligible, write bool
+	}{
+		{"disabled", human, "disabled", false, false, true},
+		{"unrunnable", human, "unrunnable", true, false, true},
+		{"author", human, "ready", true, true, true},
+		{"reader", reader, "ready", true, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc.Ready = nil
+			if tc.ready {
+				svc.Ready = func() bool { return true }
+			}
+			svc.Eligible = func(context.Context, pgtype.UUID, pgtype.UUID) bool { return tc.eligible }
+			req := withURLParam((actingCaller{authUserID: tc.user}).request("GET", "/api/workflows/"+created.ID, nil), "id", created.ID)
+			got := testutil.Call(t, testHandler.GetWorkflow, req).Want(200).Map()
+			availability, ok := got["runtime_availability"].(map[string]any)
+			if !ok || availability["state"] != tc.state || got["can_write"] != tc.write {
+				t.Fatalf("projection: %+v", got)
+			}
+		})
 	}
 }
 

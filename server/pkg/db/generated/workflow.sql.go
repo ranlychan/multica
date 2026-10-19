@@ -396,7 +396,10 @@ func (q *Queries) BindWorkflowActionEngineRun(ctx context.Context, arg BindWorkf
 
 const cancelUnsubmittedWorkflowRun = `-- name: CancelUnsubmittedWorkflowRun :one
 UPDATE workflow_run SET status='cancelled',finished_at=now()
-WHERE id=$1 AND workspace_id=$2 AND status='queued' AND submission_started_at IS NULL AND cancel_requested_at IS NOT NULL RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at, pending_terminal_status, pending_terminal_output, final_projection_attempts
+WHERE id=$1 AND workspace_id=$2 AND
+ ((status='queued' AND submission_started_at IS NULL) OR
+  (status='submitting' AND submission_attempts=0 AND hatchet_run_id IS NULL))
+AND cancel_requested_at IS NOT NULL RETURNING id, workspace_id, workflow_id, revision_id, definition_hash, principal_user_id, trigger_id, source, status, planned_at, idempotency_key, submission_started_at, submission_deadline, hatchet_run_id, input, output, issue_id, task_id, originator_user_id, accountable_user_id, originator_source, reason_code, failure_reason, triggered_at, started_at, finished_at, duration_ms, created_at, cancel_requested_at, cancel_requested_by_id, submission_attempts, submission_lease_until, log_projection, step_projection, last_reconciled_at, pending_terminal_status, pending_terminal_output, final_projection_attempts
 `
 
 type CancelUnsubmittedWorkflowRunParams struct {
@@ -3236,4 +3239,27 @@ func (q *Queries) WorkflowDatabaseTime(ctx context.Context) (pgtype.Timestamptz,
 	var column_1 pgtype.Timestamptz
 	err := row.Scan(&column_1)
 	return column_1, err
+}
+
+const workflowTriggerSummary = `-- name: WorkflowTriggerSummary :one
+SELECT COALESCE(array_agg(DISTINCT kind), ARRAY[]::text[])::text[] AS kinds,
+ min(next_run_at) FILTER (WHERE enabled AND kind='schedule') AS next_run_at
+FROM workflow_trigger WHERE workflow_id=$1 AND workspace_id=$2
+`
+
+type WorkflowTriggerSummaryParams struct {
+	WorkflowID  pgtype.UUID `json:"workflow_id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+type WorkflowTriggerSummaryRow struct {
+	Kinds     []string    `json:"kinds"`
+	NextRunAt interface{} `json:"next_run_at"`
+}
+
+func (q *Queries) WorkflowTriggerSummary(ctx context.Context, arg WorkflowTriggerSummaryParams) (WorkflowTriggerSummaryRow, error) {
+	row := q.db.QueryRow(ctx, workflowTriggerSummary, arg.WorkflowID, arg.WorkspaceID)
+	var i WorkflowTriggerSummaryRow
+	err := row.Scan(&i.Kinds, &i.NextRunAt)
+	return i, err
 }
