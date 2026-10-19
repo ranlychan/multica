@@ -16,7 +16,7 @@ export function WorkflowRunPage({ workflowId, runId }: { workflowId: string; run
   const run = useQuery(workflowRunOptions(wsId, workflowId, runId));
   const active = !!run.data && isWorkflowRunActive(run.data.status);
   const revision = useQuery(workflowRevisionOptions(wsId, workflowId, run.data?.revisionId ?? ""));
-  const logs = useQuery(workflowLogsOptions(wsId, workflowId, runId, offset, active));
+  const logs = useQuery(workflowLogsOptions(wsId, workflowId, runId, offset, run.data?.status));
   const cancel = useWorkflowRunAction(wsId, workflowId, "cancel"); const replay = useWorkflowRunAction(wsId, workflowId, "replay");
   if (run.isPending || workflow.isPending || !run.data || !workflow.data) return <WorkflowLoadState loading={run.isPending || workflow.isPending} />;
   const canWrite = workflow.data.canWrite;

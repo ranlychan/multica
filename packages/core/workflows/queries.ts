@@ -30,6 +30,8 @@ export function workflowRunOptions(wsId: string, id: string, runId: string) {
   return queryOptions({ queryKey: [...workflowKeys.detail(wsId, id), "run", runId], queryFn: () => api.getWorkflowRun(id, runId), enabled: !!wsId && !!id && !!runId,
     refetchInterval: (query) => query.state.data && isWorkflowRunActive(query.state.data.status) ? 5_000 : false });
 }
-export function workflowLogsOptions(wsId: string, id: string, runId: string, offset = 0, active = false) {
-  return queryOptions({ queryKey: [...workflowKeys.detail(wsId, id), "logs", runId, offset], queryFn: () => api.getWorkflowLogs(id, runId, offset), enabled: !!wsId && !!id && !!runId, refetchInterval: active ? 5_000 : false });
+export function workflowLogsOptions(wsId: string, id: string, runId: string, offset = 0, status?: string) {
+  const active = status !== undefined && isWorkflowRunActive(status);
+  // A terminal snapshot must not reuse (or race) a page fetched before final projection.
+  return queryOptions({ queryKey: [...workflowKeys.detail(wsId, id), "logs", runId, offset, active ? "active" : "terminal"], queryFn: () => api.getWorkflowLogs(id, runId, offset), enabled: !!wsId && !!id && !!runId && status !== undefined, refetchInterval: active ? 5_000 : false });
 }

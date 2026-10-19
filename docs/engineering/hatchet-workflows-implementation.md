@@ -291,3 +291,32 @@ The command-scoped real PostgreSQL adapter is retained in ignored
 `.multica/task8-bin`, not the scratch-report directory. It rejects any connection
 outside its verified listener; inspect the retained container's actual published
 port again before a future restart rather than assuming it is stable.
+
+## Task 8 review fix: final log snapshot
+
+I1 identified that changing the same log query's interval from5000 to false did
+not fetch its final projection, leaving old entries mounted indefinitely. Log
+keys now append an active/terminal snapshot phase after the unchanged workspace,
+workflow, run and page prefix. Queries wait for observed run status; transition
+fetches the requested terminal page once, without periodic polling. An older
+in-flight active response cannot overwrite it. Other pages remain bounded and
+on-demand; prefix invalidation and ordinary cache GC cover both phases.
+
+With the real app QueryClient (including infinite stale time) and only transport
+mocked, the final regression version observed RED7fail/11pass against the original
+production code, then GREEN18/18 in952ms after restoring the fix. It covers all
+four terminal states, old active entries, an in-flight active request, deferred
+already-terminal mount, cached page navigation and no further periodic requests.
+Node22 verification commands and results:
+
+- `pnpm --filter @multica/views exec vitest run workflows/workflows.test.tsx`:
+  PASS18; core `workflows/queries.test.ts` also PASS7.
+- `pnpm test --concurrency=1`: PASS8/8 tasks (3cached),2m46.93s; views5968,
+  core2202,desktop666,web279 and the other four packages pass. No assertions or
+  timeouts were reduced.
+- `pnpm typecheck`: PASS12/12 (7cached),1m4.075s; `pnpm lint`: PASS7/7
+  (5cached),13.13s, existing warnings retained.
+
+This UI/cache-only fix does not claim new Go/live-engine execution; the earlier
+both-phase backend and actual durability2/2 receipts remain unchanged. Minor JSX
+formatting and warning triage are deferred review-ledger items, not suppressed.
