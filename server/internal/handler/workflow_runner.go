@@ -250,6 +250,10 @@ func (h *Handler) WorkflowRunnerRotate(w http.ResponseWriter, r *http.Request) {
 		workflowDenied(w, 503, "workflow_unavailable")
 		return
 	}
+	if fresh, err := q.WorkflowControlAuthorityFresh(r.Context(), db.WorkflowControlAuthorityFreshParams{WorkspaceID: d.WorkspaceID, ControlHash: d.ControlHash}); err != nil || !fresh {
+		workflowDenied(w, 401, "workflow_unauthenticated")
+		return
+	}
 	if tx.Commit(r.Context()) != nil {
 		workflowDenied(w, 503, "workflow_unavailable")
 		return
@@ -292,6 +296,10 @@ func (h *Handler) WorkflowRunnerRotate(w http.ResponseWriter, r *http.Request) {
 		workflowDenied(w, 503, "workflow_unavailable")
 		return
 	}
+	if fresh, err := q.WorkflowControlAuthorityFresh(r.Context(), db.WorkflowControlAuthorityFreshParams{WorkspaceID: d.WorkspaceID, ControlHash: d.ControlHash}); err != nil || !fresh {
+		workflowDenied(w, 401, "workflow_unauthenticated")
+		return
+	}
 	if tx.Commit(r.Context()) != nil {
 		workflowDenied(w, 503, "workflow_unavailable")
 		return
@@ -330,8 +338,27 @@ func (h *Handler) WorkflowRunnerRotate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	// Lock the original reservation before checking wall-clock expiry. Updating
+	// its expiry to the engine JWT deadline must not revive an expired reservation.
+	if _, e = q.LockWorkflowRunnerGeneration(r.Context(), db.LockWorkflowRunnerGenerationParams{WorkspaceID: d.WorkspaceID, DaemonID: d.DaemonID, ID: row.ID, ControlHash: d.ControlHash}); e != nil {
+		workflowDenied(w, 401, "workflow_unauthenticated")
+		return
+	}
+	freshParams := db.WorkflowRunnerGenerationAuthorityFreshParams{WorkspaceID: d.WorkspaceID, DaemonID: d.DaemonID, ID: row.ID, ControlHash: d.ControlHash}
+	if fresh, err := q.WorkflowRunnerGenerationAuthorityFresh(r.Context(), freshParams); err != nil || !fresh {
+		workflowDenied(w, 401, "workflow_unauthenticated")
+		return
+	}
 	n, e := q.SetWorkflowRunnerEngineToken(r.Context(), db.SetWorkflowRunnerEngineTokenParams{WorkspaceID: d.WorkspaceID, DaemonID: d.DaemonID, ID: row.ID, ControlHash: d.ControlHash, EngineTokenID: cred.TokenID, ExpiresAt: pgtype.Timestamptz{Time: cred.ExpiresAt, Valid: true}})
-	if e != nil || n != 1 || tx.Commit(r.Context()) != nil {
+	if e != nil || n != 1 {
+		workflowDenied(w, 503, "workflow_unavailable")
+		return
+	}
+	if fresh, err := q.WorkflowRunnerGenerationAuthorityFresh(r.Context(), freshParams); err != nil || !fresh {
+		workflowDenied(w, 401, "workflow_unauthenticated")
+		return
+	}
+	if tx.Commit(r.Context()) != nil {
 		workflowDenied(w, 503, "workflow_unavailable")
 		return
 	}
@@ -455,7 +482,7 @@ func (h *Handler) workflowRunnerAcknowledge(w http.ResponseWriter, r *http.Reque
 		workflowDenied(w, 401, "workflow_unauthenticated")
 		return
 	}
-	if token, e = q.GetWorkflowRunnerGeneration(r.Context(), db.GetWorkflowRunnerGenerationParams{WorkspaceID: d.WorkspaceID, DaemonID: d.DaemonID, ID: gen, ControlHash: d.ControlHash}); e != nil {
+	if token, e = q.LockWorkflowRunnerGeneration(r.Context(), db.LockWorkflowRunnerGenerationParams{WorkspaceID: d.WorkspaceID, DaemonID: d.DaemonID, ID: gen, ControlHash: d.ControlHash}); e != nil {
 		workflowDenied(w, 401, "workflow_unauthenticated")
 		return
 	}
@@ -486,6 +513,22 @@ func (h *Handler) workflowRunnerAcknowledge(w http.ResponseWriter, r *http.Reque
 			validationFailed = true
 		}
 	}
+	freshParams := db.WorkflowRunnerGenerationAuthorityFreshParams{WorkspaceID: d.WorkspaceID, DaemonID: d.DaemonID, ID: gen, ControlHash: d.ControlHash}
+	if validationFailed {
+		// Keep partial publication and original CAS/authority failure evidence,
+		// but a failed candidate must not replace the daemon's healthy current.
+		// The daemon stops/retires this candidate on 409 and can rotate again.
+		if fresh, err := q.WorkflowRunnerGenerationAuthorityFresh(r.Context(), freshParams); err != nil || !fresh {
+			workflowDenied(w, 401, "workflow_unauthenticated")
+			return
+		}
+		if tx.Commit(r.Context()) != nil {
+			workflowDenied(w, 503, "workflow_unavailable")
+			return
+		}
+		workflowDenied(w, 409, "workflow_validation_mismatch")
+		return
+	}
 	if !prepare && token.Phase == "candidate" {
 		if e = q.DemoteWorkflowRunnerCurrent(r.Context(), db.DemoteWorkflowRunnerCurrentParams{WorkspaceID: d.WorkspaceID, DaemonID: d.DaemonID}); e != nil {
 			workflowDenied(w, 503, "workflow_unavailable")
@@ -498,12 +541,16 @@ func (h *Handler) workflowRunnerAcknowledge(w http.ResponseWriter, r *http.Reque
 	}
 	data, _ := json.Marshal(registrations)
 	count, e := q.LeaseWorkflowRunnerGeneration(r.Context(), db.LeaseWorkflowRunnerGenerationParams{WorkspaceID: d.WorkspaceID, DaemonID: d.DaemonID, ID: gen, ControlHash: d.ControlHash, Registrations: data})
-	if e != nil || count != 1 || tx.Commit(r.Context()) != nil {
+	if e != nil || count != 1 {
 		workflowDenied(w, 401, "workflow_unauthenticated")
 		return
 	}
-	if validationFailed {
-		workflowDenied(w, 409, "workflow_validation_mismatch")
+	if fresh, err := q.WorkflowRunnerGenerationAuthorityFresh(r.Context(), freshParams); err != nil || !fresh {
+		workflowDenied(w, 401, "workflow_unauthenticated")
+		return
+	}
+	if tx.Commit(r.Context()) != nil {
+		workflowDenied(w, 401, "workflow_unauthenticated")
 		return
 	}
 	writeJSON(w, 200, map[string]int{"lease_seconds": 45})

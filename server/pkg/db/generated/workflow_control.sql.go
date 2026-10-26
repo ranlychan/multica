@@ -501,6 +501,48 @@ func (q *Queries) LockWorkflowRunnerAuthorization(ctx context.Context, arg LockW
 	return i, err
 }
 
+const lockWorkflowRunnerGeneration = `-- name: LockWorkflowRunnerGeneration :one
+SELECT id, workspace_id, daemon_id, token_hash, label, created_by_id, last_used_at, revoked_at, expires_at, created_at, control_hash, tenant_id, registrations, lease_until, phase, engine_token_id, engine_revoked_at, engine_issuance_unknown FROM workflow_runner_token WHERE workspace_id=$1 AND daemon_id=$2 AND id=$3 AND control_hash=$4 AND revoked_at IS NULL AND expires_at>now() FOR UPDATE
+`
+
+type LockWorkflowRunnerGenerationParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	DaemonID    string      `json:"daemon_id"`
+	ID          pgtype.UUID `json:"id"`
+	ControlHash string      `json:"control_hash"`
+}
+
+func (q *Queries) LockWorkflowRunnerGeneration(ctx context.Context, arg LockWorkflowRunnerGenerationParams) (WorkflowRunnerToken, error) {
+	row := q.db.QueryRow(ctx, lockWorkflowRunnerGeneration,
+		arg.WorkspaceID,
+		arg.DaemonID,
+		arg.ID,
+		arg.ControlHash,
+	)
+	var i WorkflowRunnerToken
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.DaemonID,
+		&i.TokenHash,
+		&i.Label,
+		&i.CreatedByID,
+		&i.LastUsedAt,
+		&i.RevokedAt,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.ControlHash,
+		&i.TenantID,
+		&i.Registrations,
+		&i.LeaseUntil,
+		&i.Phase,
+		&i.EngineTokenID,
+		&i.EngineRevokedAt,
+		&i.EngineIssuanceUnknown,
+	)
+	return i, err
+}
+
 const promoteWorkflowRunnerCandidate = `-- name: PromoteWorkflowRunnerCandidate :execrows
 UPDATE workflow_runner_token SET phase='current' WHERE workspace_id=$1 AND daemon_id=$2 AND id=$3 AND phase='candidate' AND revoked_at IS NULL AND expires_at>now()
 `
@@ -601,6 +643,24 @@ func (q *Queries) SetWorkflowRunnerEngineToken(ctx context.Context, arg SetWorkf
 	return result.RowsAffected(), nil
 }
 
+const workflowControlAuthorityFresh = `-- name: WorkflowControlAuthorityFresh :one
+SELECT EXISTS(SELECT 1 FROM workflow_daemon
+WHERE workspace_id=$1 AND control_hash=$2 AND capable AND control_expires_at>clock_timestamp())
+`
+
+type WorkflowControlAuthorityFreshParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	ControlHash string      `json:"control_hash"`
+}
+
+// Run separately after every potentially blocking authority/token write.
+func (q *Queries) WorkflowControlAuthorityFresh(ctx context.Context, arg WorkflowControlAuthorityFreshParams) (bool, error) {
+	row := q.db.QueryRow(ctx, workflowControlAuthorityFresh, arg.WorkspaceID, arg.ControlHash)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const workflowRunnerActionAuthorityFresh = `-- name: WorkflowRunnerActionAuthorityFresh :one
 SELECT EXISTS(SELECT 1 FROM workflow_runner_token t
 JOIN workflow_daemon d ON d.workspace_id=t.workspace_id AND d.daemon_id=t.daemon_id AND d.control_hash=t.control_hash
@@ -639,6 +699,35 @@ type WorkflowRunnerEligibleParams struct {
 
 func (q *Queries) WorkflowRunnerEligible(ctx context.Context, arg WorkflowRunnerEligibleParams) (bool, error) {
 	row := q.db.QueryRow(ctx, workflowRunnerEligible, arg.WorkspaceID, arg.RevisionID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const workflowRunnerGenerationAuthorityFresh = `-- name: WorkflowRunnerGenerationAuthorityFresh :one
+SELECT EXISTS(SELECT 1 FROM workflow_runner_token t
+JOIN workflow_daemon d ON d.workspace_id=t.workspace_id AND d.daemon_id=t.daemon_id AND d.control_hash=t.control_hash
+WHERE t.workspace_id=$1 AND t.daemon_id=$2 AND t.id=$3 AND t.control_hash=$4
+AND t.revoked_at IS NULL AND t.expires_at>clock_timestamp()
+AND d.capable AND d.control_expires_at>clock_timestamp())
+`
+
+type WorkflowRunnerGenerationAuthorityFreshParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	DaemonID    string      `json:"daemon_id"`
+	ID          pgtype.UUID `json:"id"`
+	ControlHash string      `json:"control_hash"`
+}
+
+// The caller holds workspace/control/generation locks. Publication and lease
+// writes may also block, so this wall-clock fence must precede each commit.
+func (q *Queries) WorkflowRunnerGenerationAuthorityFresh(ctx context.Context, arg WorkflowRunnerGenerationAuthorityFreshParams) (bool, error) {
+	row := q.db.QueryRow(ctx, workflowRunnerGenerationAuthorityFresh,
+		arg.WorkspaceID,
+		arg.DaemonID,
+		arg.ID,
+		arg.ControlHash,
+	)
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err

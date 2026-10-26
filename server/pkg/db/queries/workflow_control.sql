@@ -16,6 +16,18 @@ JOIN workspace w ON w.id=d.workspace_id
 JOIN member m ON m.workspace_id=d.workspace_id AND m.user_id=d.owner_id
 WHERE d.control_hash=$1 AND d.workspace_id=$2 AND d.control_expires_at>now() AND d.capable
 FOR UPDATE OF d;
+-- name: WorkflowControlAuthorityFresh :one
+-- Run separately after every potentially blocking authority/token write.
+SELECT EXISTS(SELECT 1 FROM workflow_daemon
+WHERE workspace_id=$1 AND control_hash=$2 AND capable AND control_expires_at>clock_timestamp());
+-- name: WorkflowRunnerGenerationAuthorityFresh :one
+-- The caller holds workspace/control/generation locks. Publication and lease
+-- writes may also block, so this wall-clock fence must precede each commit.
+SELECT EXISTS(SELECT 1 FROM workflow_runner_token t
+JOIN workflow_daemon d ON d.workspace_id=t.workspace_id AND d.daemon_id=t.daemon_id AND d.control_hash=t.control_hash
+WHERE t.workspace_id=$1 AND t.daemon_id=$2 AND t.id=$3 AND t.control_hash=$4
+AND t.revoked_at IS NULL AND t.expires_at>clock_timestamp()
+AND d.capable AND d.control_expires_at>clock_timestamp());
 -- name: ListWorkflowRunnerRevisions :many
 SELECT r.* FROM workflow_revision r JOIN workflow w ON w.id=r.workflow_id AND w.workspace_id=r.workspace_id
 WHERE r.workspace_id=$1 AND (
@@ -51,6 +63,8 @@ AND t.expires_at>clock_timestamp() AND t.lease_until>clock_timestamp()
 AND d.control_expires_at>clock_timestamp());
 -- name: GetWorkflowRunnerGeneration :one
 SELECT * FROM workflow_runner_token WHERE workspace_id=$1 AND daemon_id=$2 AND id=$3 AND control_hash=$4 AND revoked_at IS NULL AND expires_at>now();
+-- name: LockWorkflowRunnerGeneration :one
+SELECT * FROM workflow_runner_token WHERE workspace_id=$1 AND daemon_id=$2 AND id=$3 AND control_hash=$4 AND revoked_at IS NULL AND expires_at>now() FOR UPDATE;
 -- name: LeaseWorkflowRunnerGeneration :execrows
 UPDATE workflow_runner_token SET registrations=$5,lease_until=now()+interval '45 seconds',last_used_at=now()
 WHERE workspace_id=$1 AND daemon_id=$2 AND id=$3 AND control_hash=$4 AND revoked_at IS NULL AND expires_at>now();

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -150,6 +151,82 @@ func TestWorkflowInvalidDraftPreservesHealthyOldGeneration(t *testing.T) {
 	}
 	if rotations != 0 {
 		t.Fatal("invalid draft rotated old product authority")
+	}
+}
+
+func TestWorkflowFinalAckFailureKeepsCurrentProcessAndRetiresCandidate(t *testing.T) {
+	node := workflowTestNode(t)
+	source := `export default {steps:[{id:'a',run:async()=>null}]};`
+	graph := wr.Graph{Steps: []wr.Step{{ID: "a", Parents: []string{}}}}
+	revision := wr.Revision{RevisionID: "proposal", Source: source, Hash: wr.Hash(source), Graph: graph, GraphDigest: wr.GraphDigest(graph)}
+	validation, err := json.Marshal(wr.Validation{Hash: revision.Hash, Graph: graph, GraphDigest: revision.GraphDigest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only the native registration transport is replaced. Real owned child IPC,
+	// activation, stop, HTTP ACK failure and manager process ownership run here.
+	entry := filepath.Join(t.TempDir(), "candidate.cjs")
+	code := fmt.Sprintf(`let d; process.on('message',m=>{
+if(m.mode==='validate')process.send({type:'validated',result:%s});
+if(m.mode==='worker'){d=m.descriptor;process.send({type:'ready',protocol:1,workspace_id:d.workspace_id,tenant_id:d.tenant_id,generation:d.generation});}
+if(m.mode==='activate')process.send({type:'active',generation:d.generation});
+if(m.mode==='drain')process.exit(0);
+});`, validation)
+	if err = os.WriteFile(entry, []byte(code), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	candidateAcks, currentAcks := 0, 0
+	retired := []string{}
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/revisions"):
+			json.NewEncoder(w).Encode(map[string]any{"revisions": []wr.Revision{revision}})
+		case strings.HasSuffix(r.URL.Path, "/rotate"):
+			json.NewEncoder(w).Encode(wr.Credentials{WorkspaceID: "ws", TenantID: "tenant", Generation: "candidate", ExpiresAt: time.Now().Add(time.Hour)})
+		case strings.HasSuffix(r.URL.Path, "/ack"):
+			var message wr.Message
+			if err := json.NewDecoder(r.Body).Decode(&message); err != nil {
+				t.Error(err)
+			}
+			if message.Generation == "candidate" {
+				candidateAcks++
+				w.WriteHeader(http.StatusConflict)
+			} else if message.Generation == "healthy" {
+				currentAcks++
+			} else {
+				t.Errorf("unexpected generation ACK %q", message.Generation)
+			}
+		case strings.HasSuffix(r.URL.Path, "/retire"):
+			var message struct {
+				Generation string `json:"generation"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&message); err != nil {
+				t.Error(err)
+			}
+			retired = append(retired, message.Generation)
+		}
+	}))
+	defer s.Close()
+	m := newWorkflowManager(WorkflowRunnerConfig{Enabled: true, AcceptedCodeRisk: true, Workspaces: []string{"ws"}, Node: node, Entry: entry, Cache: filepath.Join(t.TempDir(), "cache")}, NewClient(s.URL))
+	current := workflowOwnedTestProcess(t, false)
+	g := &workflowGeneration{control: "wdc_test", process: current, started: time.Now(), ready: wr.Message{Generation: "healthy"}, expires: time.Now().Add(time.Hour)}
+	m.generations["ws"] = g
+	m.reconcile(context.Background(), map[string]bool{"ws": true})
+	if g.process != current || g.ready.Generation != "healthy" || g.retiring != nil {
+		t.Fatal("failed final ACK changed manager current/retiring process ownership")
+	}
+	select {
+	case <-current.done:
+		t.Fatal("failed final ACK stopped healthy current")
+	default:
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if candidateAcks != 1 || currentAcks < 2 || len(retired) != 1 || retired[0] != "candidate" || !g.next.After(time.Now()) {
+		t.Fatalf("candidate failure cleanup/renewal: candidate ACKs=%d current ACKs=%d retired=%v", candidateAcks, currentAcks, retired)
 	}
 }
 

@@ -320,3 +320,90 @@ Node22 verification commands and results:
 This UI/cache-only fix does not claim new Go/live-engine execution; the earlier
 both-phase backend and actual durability2/2 receipts remain unchanged. Minor JSX
 formatting and warning triage are deferred review-ledger items, not suppressed.
+
+## Final review fix wave: trigger reads and generation authority
+
+The three Important findings from the completed whole-branch review are addressed
+in one consolidated fix wave. Acceptance still requires the controller's single
+scoped rereview; this handoff does not declare the branch ready to merge.
+
+Public trigger create/update/list projections now apply the same bounded,
+recognizable-field/bearer sanitizer as run input. The original private stored
+template remains available for execution. Trigger-token rotation continues to
+return only its newly issued token. The actual HTTP/member-read regression
+checks nested fields/arrays/bearers and structurally unchanged stored JSON.
+
+A failed final ACK retains original per-revision publication success and
+CAS/authoring-failure evidence, then returns409 before any generation handover or
+lease change. The healthy current worker retains its phase, lease and checked
+registrations; its failed prepared candidate remains candidate for daemon
+stop/retire. A winning newly published revision can remain unavailable until
+replacement succeeds. Both competing proposals and an editor losing authority
+are covered through candidate retirement, old-worker renewal, a successful new
+rotation/ACK and queued admission of the actual current revision. A separate
+owned Node IPC test verifies that HTTP409 keeps the manager's current process,
+does not create a retiring owner, retires only the failed candidate and renews
+the healthy process's lease.
+
+Rotation's two preliminary commits now separately check the database wall clock
+after their blocking writes. Final credential delivery locks and checks the
+original generation reservation before extending its deadline, then checks both
+control and generation expiry after the token write and before commit. Final
+ACK/prepare check those expiries after publication/demotion/lease locks; an
+evidence-only failed ACK has the same final fence. Expiry rolls back that
+transaction and invokes existing exact-token cleanup for an abandoned mint.
+Workspace → daemon → generation → workflow lock order and the separate existing
+action fence are retained. No engine I/O is moved under application row locks.
+
+Actual unchanged-row lock regressions observe the exact blocking backend PIDs,
+wait for PostgreSQL `clock_timestamp()` to cross expiry, then unlock. They cover
+24 ACK/prepare/evidence-only cases (including demotion of the old current), six
+final-mint cases, and five preliminary rotation cases. Assertions require no
+publication/phase/map/lease mutation, no delivered token and exact abandoned-token
+revocation without revoking the healthy generation. No new control framework,
+SDK timeout policy, CLI projection or JSX change is included.
+
+Fresh fix-wave receipts use the same inspected retained PostgreSQL container/data
+volume and published51106 listener, explicit reachable `multica_task3` at
+migration605, Node22.23.3, `GOPROXY=https://goproxy.cn,direct`, and the repository
+agent-CLI guard. Container/DB ownership and migration/counts were reverified on
+resumption; no database/state/key reset or service restart occurred.
+
+| Check | Result |
+| --- | --- |
+| `TestWorkflowTriggerPublicTemplateRedactionPreservesStoredInput` | Actual RED: create/update/member list exposed nested credentials; token-only rotation safe. GREEN covers all four responses and unchanged stored input. |
+| Exact I2/I3 handler selector, `-count=1 -v` | RED43.900s: both failed-ACK handovers and28 expiry cases reproduced. First GREEN44.008s. |
+| Demotion-lock mutation, removing only final post-lease fence | RED3.586s for both control/generation expiry; fence restored before race verification. |
+| Preliminary-rotation mutation, removing only its two final control fences | RED8.180s for all five cases; both fences restored. |
+| `go test -race -p 1 ./internal/handler -run '^TestWorkflowControlRotationInitialStagesPostLockExpiry$\|^TestWorkflowControlRotationPostLockExpiryRevokesOnlyUndeliveredJWT$' -count=1 -v` | GREEN19.109s, all11 cases, exact token-ID cleanup assertions. |
+| `go test -race -p 1 ./internal/handler ./internal/daemon ./internal/hatchet ./cmd/migrate -run 'Workflow\|HatchetTenant\|HatchetClient' -count=1 -v` | PASS handler62.182s, daemon100.379s, Hatchet1.366s, migrate1.482s. These completed saved outputs were recovered after interruption; they were not regenerated. Explicit live engine and separate destructive tenant SQL fixture tests remained gated. New authority SQL was exercised by the actual handler DB tests. |
+| `make sqlc`; four pinned binary checksums | PASS; only expected control queries regenerated, all four retained binaries verified `OK`. |
+
+The one complete backend invocation for this fix wave completed on October26:
+
+```sh
+PATH="$OWNED_PSQL_ADAPTER_DIR:$NODE22_BIN_DIR:$PATH" \
+  GOPROXY=https://goproxy.cn,direct GOFLAGS=-p=1 \
+  MULTICA_WORKFLOW_TEST_NODE="$NODE22_EXECUTABLE" MULTICA_RUN_REAL_AGENT_SMOKE=0 \
+  make test DATABASE_URL="$DISPOSABLE_UNIT_DATABASE_URL" \
+  POSTGRES_DB=multica_task3 MULTICA_HATCHET_ENABLED=false
+```
+
+PASS exit0:69 regular packages followed by the complete guarded `pkg/agent`
+phase,70 passing packages total, zero cached results,14 packages without tests.
+Representative fresh results: server10.063s, daemon129.414s, handler103.508s,
+Hatchet5.569s, service9.280s, migration15.252s and agent120.572s. No unexpected
+agent CLI invocation was reported. The explicit live/provider tests remained
+opt-in; these are actual local fixture/race results, not new engine/provider
+proof. The existing owned-env preflight reported the retained app DB; the
+explicit make-exported unit DB URL controlled migrations and Go tests. All
+migrations were already applied. Final database counts remained0workflows/1run,
+the managed services remained stopped, `.env` stayed0600 and engine state0700.
+`gofmt -l` and `git diff --check` passed.
+
+Frontend and long-engine durability proof are unchanged and were not repeated.
+M1 SDK sleep-only timeout, M2 CLI transport/run reason overwrite and M3
+compressed shared JSX remain unchanged, nonblocking items for explicit controller
+adjudication. The historical unexplained retry timeout, engine revocation cache/
+stream limits, platform/runtime proof gaps and existing warnings above remain
+disclosed; no broader guarantees are inferred from these focused fixes.

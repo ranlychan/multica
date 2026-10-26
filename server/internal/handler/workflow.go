@@ -580,7 +580,7 @@ func workflowToken() (string, string, error) {
 	return token, hex.EncodeToString(sum[:]), nil
 }
 func workflowTriggerView(row db.WorkflowTrigger) map[string]any {
-	return map[string]any{"id": row.ID, "workspace_id": row.WorkspaceID, "workflow_id": row.WorkflowID, "kind": row.Kind, "principal_user_id": row.PrincipalUserID, "enabled": row.Enabled, "cron_expression": row.CronExpression, "timezone": row.Timezone, "next_run_at": row.NextRunAt, "input_template": json.RawMessage(row.InputTemplate), "label": row.Label, "created_by_type": row.CreatedByType, "created_by_id": row.CreatedByID}
+	return map[string]any{"id": row.ID, "workspace_id": row.WorkspaceID, "workflow_id": row.WorkflowID, "kind": row.Kind, "principal_user_id": row.PrincipalUserID, "enabled": row.Enabled, "cron_expression": row.CronExpression, "timezone": row.Timezone, "next_run_at": row.NextRunAt, "input_template": service.SanitizeWorkflowInput(row.InputTemplate), "label": row.Label, "created_by_type": row.CreatedByType, "created_by_id": row.CreatedByID}
 }
 func (h *Handler) ListWorkflowTriggers(w http.ResponseWriter, r *http.Request) {
 	entity, _, ok := h.workflowResource(w, r, false, false)
