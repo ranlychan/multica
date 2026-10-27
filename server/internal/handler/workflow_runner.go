@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/hatchet"
+	"github.com/multica-ai/multica/server/internal/middleware"
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/util"
 	wr "github.com/multica-ai/multica/server/internal/workflowrunner"
@@ -83,7 +84,7 @@ func (h *Handler) workflowControlReady() bool {
 }
 
 func (h *Handler) enrollWorkflowDaemon(r *http.Request, req DaemonRegisterRequest, owner pgtype.UUID) (string, error) {
-	if !owner.Valid || isMachineCredentialActor(r) {
+	if !owner.Valid || isMachineCredentialActor(r) || middleware.DaemonWorkspaceIDFromContext(r.Context()) != "" {
 		return "", errors.New("workflow_forbidden")
 	}
 	// Read current membership even if ordinary daemon authentication used a cache.

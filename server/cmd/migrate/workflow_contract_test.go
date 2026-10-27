@@ -47,10 +47,10 @@ func TestWorkflowDurableContracts(t *testing.T) {
 	var applied []string
 	legacyID, legacyWS := uuid.NewString(), uuid.NewString()
 	for _, file := range files {
-		if filepath.Base(file) < "564_" || filepath.Base(file) >= "604_" {
+		if filepath.Base(file) < "595_" || filepath.Base(file) >= "635_" {
 			continue
 		}
-		if strings.HasPrefix(filepath.Base(file), "602_") {
+		if strings.HasPrefix(filepath.Base(file), "633_") {
 			exec(fmt.Sprintf("INSERT INTO workflow_runner_token(id,workspace_id,daemon_id,token_hash,expires_at) VALUES('%s','%s','migration-legacy','legacy-hash',now()+interval '1 hour')", legacyID, legacyWS))
 		}
 		b, err := os.ReadFile(file)

@@ -69,7 +69,7 @@ func TestHatchetTenantSQLFences(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	migration, err := os.ReadFile("../../migrations/587_workflow_hatchet_tenant.up.sql")
+	migration, err := os.ReadFile("../../migrations/618_workflow_hatchet_tenant.up.sql")
 	if err != nil {
 		t.Fatal(err)
 	}

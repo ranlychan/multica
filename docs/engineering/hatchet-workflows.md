@@ -309,27 +309,27 @@ calls; it does not rewrite historical runs.
 
 **Files:**
 
-- Modify: `server/migrations/564_workflow.up.sql` through
-  `server/migrations/580_agent_task_queue_workflow_run_index.up.sql` and matching
+- Modify: `server/migrations/595_workflow.up.sql` through
+  `server/migrations/611_agent_task_queue_workflow_run_index.up.sql` and matching
   down migrations while they remain unmerged
-- Create: `server/migrations/581_workflow_revision.up.sql`
-- Create: `server/migrations/581_workflow_revision.down.sql`
-- Create: `server/migrations/582_workflow_revision_version_index.up.sql`
-- Create: `server/migrations/582_workflow_revision_version_index.down.sql`
-- Create: `server/migrations/583_workflow_trigger_token_hash_index.up.sql`
-- Create: `server/migrations/583_workflow_trigger_token_hash_index.down.sql`
-- Create: `server/migrations/584_workflow_run_planned_index.up.sql`
-- Create: `server/migrations/584_workflow_run_planned_index.down.sql`
-- Create: `server/migrations/585_workflow_collaborator.up.sql`
-- Create: `server/migrations/585_workflow_collaborator.down.sql`
-- Create: `server/migrations/586_workflow_collaborator_index.up.sql`
-- Create: `server/migrations/586_workflow_collaborator_index.down.sql`
-- Create: `server/migrations/587_workflow_hatchet_tenant.up.sql`
-- Create: `server/migrations/587_workflow_hatchet_tenant.down.sql`
-- Create: `server/migrations/588_workflow_operation.up.sql`
-- Create: `server/migrations/588_workflow_operation.down.sql`
-- Create: `server/migrations/589_workflow_operation_key_index.up.sql`
-- Create: `server/migrations/589_workflow_operation_key_index.down.sql`
+- Create: `server/migrations/612_workflow_revision.up.sql`
+- Create: `server/migrations/612_workflow_revision.down.sql`
+- Create: `server/migrations/613_workflow_revision_version_index.up.sql`
+- Create: `server/migrations/613_workflow_revision_version_index.down.sql`
+- Create: `server/migrations/614_workflow_trigger_token_hash_index.up.sql`
+- Create: `server/migrations/614_workflow_trigger_token_hash_index.down.sql`
+- Create: `server/migrations/615_workflow_run_planned_index.up.sql`
+- Create: `server/migrations/615_workflow_run_planned_index.down.sql`
+- Create: `server/migrations/616_workflow_collaborator.up.sql`
+- Create: `server/migrations/616_workflow_collaborator.down.sql`
+- Create: `server/migrations/617_workflow_collaborator_index.up.sql`
+- Create: `server/migrations/617_workflow_collaborator_index.down.sql`
+- Create: `server/migrations/618_workflow_hatchet_tenant.up.sql`
+- Create: `server/migrations/618_workflow_hatchet_tenant.down.sql`
+- Create: `server/migrations/619_workflow_operation.up.sql`
+- Create: `server/migrations/619_workflow_operation.down.sql`
+- Create: `server/migrations/620_workflow_operation_key_index.up.sql`
+- Create: `server/migrations/620_workflow_operation_key_index.down.sql`
 - Create: `server/pkg/db/queries/workflow.sql`
 - Modify: `server/pkg/db/queries/workspace_delete.sql`
 - Regenerate: `server/pkg/db/generated/`

@@ -34,7 +34,7 @@ func (p WorkflowTaskEnqueue) MatchesAgent(agent db.Agent) bool {
 
 func (s *TaskService) EnqueueWorkflowIssueTaskInTx(ctx context.Context, q *db.Queries, issue db.Issue, agent pgtype.UUID, squad pgtype.UUID, prepared WorkflowTaskEnqueue) (db.AgentTaskQueue, error) {
 	prepared.Queries = q
-	return s.enqueueMentionTaskWithCommentPlan(ctx, issue, agent, pgtype.UUID{}, nil, squad.Valid, squad, false, "", prepared.Principal, pgtype.UUID{}, OriginDerived, prepared)
+	return s.enqueueMentionTaskWithCommentPlan(ctx, issue, agent, pgtype.UUID{}, nil, squad.Valid, squad, false, "", prepared.Principal, pgtype.UUID{}, OriginDerived, false, prepared)
 }
 
 func (s *TaskService) FinalizeWorkflowTask(ctx context.Context, task db.AgentTaskQueue) {

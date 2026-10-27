@@ -31,7 +31,7 @@ func TestWorkflowAuthoringEnvironment(t *testing.T) {
 	if got := d.workflowAuthoringEnv; len(got) != 2 || got["MULTICA_WORKFLOW_NODE"] != node || got["MULTICA_WORKFLOW_RUNNER"] != entry {
 		t.Fatalf("authoring environment = %v; want only configured Node and runner paths", got)
 	}
-	agentEnv := d.taskMulticaEnvironment(Task{}, "", "task-token", "", "", "", 0, 0, "")
+	agentEnv := d.taskMulticaEnvironment(Task{}, "", "", "task-token", "", "", "", 0, 0, "")
 	if agentEnv["MULTICA_WORKFLOW_NODE"] != node || agentEnv["MULTICA_WORKFLOW_RUNNER"] != entry || agentEnv["MULTICA_TOKEN"] != "task-token" {
 		t.Fatalf("task environment did not preserve local authoring tools and task identity: %v", agentEnv)
 	}

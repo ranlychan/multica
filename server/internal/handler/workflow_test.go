@@ -98,15 +98,20 @@ func TestWorkflowHTTPTaskTokenMiddlewareBindsActorWorkspaceAndCurrentOriginator(
 	dbfx.Insert(t, "task_token", testutil.Cols{"token_hash": auth.HashToken(token), "task_id": task, "agent_id": agent, "workspace_id": testWorkspaceID, "user_id": testUserID, "expires_at": testutil.Raw("now()+interval '1 hour'")})
 	route := middleware.Auth(testHandler.Queries, nil, nil, nil)(middleware.RequireWorkspaceMember(testHandler.Queries)(http.HandlerFunc(testHandler.CreateWorkflow)))
 	request := func(slug string) *http.Request {
-		r := newRequest("POST", "/api/workflows?workspace_slug=forged", map[string]any{"name": "token workflow", "slug": slug})
+		r := newRequest("POST", "/api/workflows?workspace_slug="+handlerTestWorkspaceSlug, map[string]any{"name": "token workflow", "slug": slug})
 		r.Header.Set("Authorization", "Bearer "+token)
-		r.Header.Set("X-Workspace-ID", uuid.NewString())
-		r.Header.Set("X-Workspace-Slug", "forged")
+		r.Header.Set("X-Workspace-ID", testWorkspaceID)
+		r.Header.Set("X-Workspace-Slug", handlerTestWorkspaceSlug)
 		r.Header.Set("X-Agent-ID", human)
 		r.Header.Set("X-Task-ID", uuid.NewString())
 		r.Header.Set("X-Actor-Source", "member")
 		return r
 	}
+	forged := request("workflow-forged")
+	forged.URL.RawQuery = "workspace_slug=forged"
+	forged.Header.Set("X-Workspace-ID", uuid.NewString())
+	forged.Header.Set("X-Workspace-Slug", "forged")
+	testutil.Call(t, route.ServeHTTP, forged).Want(403)
 	var result struct {
 		ID        string `json:"id"`
 		Creator   string `json:"created_by_id"`

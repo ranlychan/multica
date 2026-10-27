@@ -92,7 +92,7 @@ func TestWorkflowActionIssueAtomicReplayConflictAndConcurrency(t *testing.T) {
 	payload := map[string]any{"title": "workflow receipt " + uuid.NewString(), "status": "todo"}
 	first := testutil.Call(t, f.h.WorkflowRunnerAction, f.action("issues.create", "create-one", payload)).Want(200).Map()
 	second := testutil.Call(t, f.h.WorkflowRunnerAction, f.action("issues.create", "create-one", payload)).Want(200).Map()
-	if string(mustJSON(first)) != string(mustJSON(second)) {
+	if string(workflowMustJSON(first)) != string(workflowMustJSON(second)) {
 		t.Fatal("replay changed result", first, second)
 	}
 	var count int
@@ -121,7 +121,7 @@ func TestWorkflowActionIssueAtomicReplayConflictAndConcurrency(t *testing.T) {
 	}
 }
 
-func mustJSON(v any) []byte { raw, _ := json.Marshal(v); return raw }
+func workflowMustJSON(v any) []byte { raw, _ := json.Marshal(v); return raw }
 
 func workflowAgentFixture(t *testing.T) (string, string) {
 	t.Helper()
@@ -188,7 +188,7 @@ func TestWorkflowActionAutopilotAtomicAncestryQuotaReplayAndOfflinePolicy(t *tes
 			testutil.Call(t, f.h.WorkflowRunnerAction, f.action("autopilots.invoke", "invoke", payload)).Want(200)
 			testutil.Call(t, f.h.WorkflowRunnerAction, f.action("autopilots.invoke", "another", payload)).Want(429)
 			testutil.Call(t, f.h.WorkflowRunnerAction, f.action("autopilots.get", "", map[string]any{"id": first["id"]})).Want(200)
-			if strings.Contains(string(mustJSON(first)), "secret") {
+			if strings.Contains(string(workflowMustJSON(first)), "secret") {
 				t.Fatal("unsafe AP result", first)
 			}
 			var workflow, principal string

@@ -554,7 +554,7 @@ func (c *APIClient) UploadIssueAttachment(ctx context.Context, fileData []byte, 
 
 	var result AttachmentResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return AttachmentResponse{}, fmt.Errorf("decode upload response: %w", err)
+		return AttachmentResponse{}, fmt.Errorf("decode upload response: %w", wrapBodyRead(req, err))
 	}
 	if result.ID == "" {
 		return AttachmentResponse{}, fmt.Errorf("upload response missing attachment id")
@@ -617,7 +617,7 @@ func (c *APIClient) UploadChatAttachment(ctx context.Context, fileData []byte, f
 
 	var result AttachmentResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return AttachmentResponse{}, fmt.Errorf("decode upload response: %w", err)
+		return AttachmentResponse{}, fmt.Errorf("decode upload response: %w", wrapBodyRead(req, err))
 	}
 	if result.ID == "" {
 		return AttachmentResponse{}, fmt.Errorf("upload response missing attachment id")
@@ -677,7 +677,7 @@ func (c *APIClient) UploadFileWithURL(ctx context.Context, fileData []byte, file
 
 	var result AttachmentResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", "", fmt.Errorf("decode upload response: %w", err)
+		return "", "", fmt.Errorf("decode upload response: %w", wrapBodyRead(req, err))
 	}
 	if result.URL == "" {
 		return "", "", fmt.Errorf("upload response missing attachment url")

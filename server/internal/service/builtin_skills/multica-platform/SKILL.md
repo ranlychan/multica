@@ -25,7 +25,7 @@ Read the invariants below, then open the reference(s) your task actually needs
 | `references/squads.md` | Squads: leader routing, roster, recording leader activity, why a squad did or did not run |
 | `references/autopilots.md` | Autopilots: schedule / webhook / manual triggers, `create_issue` vs `run_only`, why one did not fire |
 | `references/workflows.md` | Workflows: TypeScript validation and immutable revisions, optimistic updates, schedule/API triggers, durable runs and bounded logs |
-| `references/projects.md` | Projects and their durable resources (`github_repo`, `local_directory`, worktree mode) |
+| `references/projects.md` | Projects and their durable resources (`github_repo`, `local_directory`, worktree mode); project workflows — status columns, handoffs, a `[Project workflow]` block in your prompt |
 | `references/runtimes.md` | Runtimes, daemons, `repo checkout`, and the task CLI boundary |
 | `references/skill-import.md` | Importing a skill into this workspace from a URL or a local archive |
 
