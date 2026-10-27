@@ -65,9 +65,12 @@ func newWorkflowCommand(validate workflowValidator) *cobra.Command {
 	update.Flags().String("default-agent-id", "", "Workspace agent UUID; empty string clears")
 	get := add(root, "get <workflow-id>", "Get workflow, revision validation status, or run details", 1)
 	get.Flags().String("revision", "", "Revision UUID to inspect")
+	get.Flags().Bool("show-source", false, "Reveal authored definition; requires --revision, JSON, and private output")
 	get.Flags().String("run", "", "Run UUID to inspect, including bounded input and step state")
 	page(add(root, "list", "List workflow identities", 0))
 	cas(add(root, "archive <workflow-id>", "Archive using the observed updated_at", 1))
+	add(root, "delete <workflow-id>", "Permanently delete workflow and its history; use archive for reversible status changes", 1)
+	page(add(root, "revisions <workflow-id>", "List one bounded page of source revisions", 1))
 	run := add(root, "run <workflow-id>", "Request a manual run as the requesting human; may incur real work and budget", 1)
 	run.Flags().String("input-file", "", "Optional local JSON input file (64 KiB, depth 32)")
 	page(add(root, "runs <workflow-id>", "List persisted local run history", 1))
@@ -83,12 +86,22 @@ func newWorkflowCommand(validate workflowValidator) *cobra.Command {
 	triggerAdd.Flags().String("label", "", "Optional trigger label")
 	triggerAdd.Flags().Bool("enabled", true, "Enable this trigger")
 	triggerAdd.Flags().String("input-file", "", "Optional local JSON input template file")
+	triggerUpdate := add(trigger, "update <workflow-id> <trigger-id>", "Update explicitly supplied trigger fields", 2)
+	triggerUpdate.Flags().Bool("enabled", true, "Enable or disable this trigger")
+	for _, flag := range []string{"label", "cron", "timezone", "input-file"} {
+		triggerUpdate.Flags().String(flag, "", "Replacement "+flag+" (only sent when supplied)")
+	}
 	add(trigger, "list <workflow-id>", "List triggers without bearer credentials", 1)
 	add(trigger, "remove <workflow-id> <trigger-id>", "Remove a trigger", 2)
 	rotate := add(trigger, "rotate-token <workflow-id> <trigger-id>", "Rotate an API bearer token; immediately invalidates the old token", 2)
 	for _, cmd := range []*cobra.Command{triggerAdd, rotate} {
 		cmd.Flags().Bool("show-secrets", false, "Reveal one-time API token and invocation URL; requires JSON and private output")
 	}
+	collaborator := &cobra.Command{Use: "collaborator", Short: "Manage human workflow collaborators"}
+	root.AddCommand(collaborator)
+	add(collaborator, "list <workflow-id>", "List workflow collaborators", 1)
+	add(collaborator, "add <workflow-id> <user-id>", "Grant a workspace member viewer or editor access", 2).Flags().String("role", "", "Required role: viewer or editor")
+	add(collaborator, "remove <workflow-id> <user-id>", "Remove a workflow collaborator", 2)
 	return root
 }
 
@@ -144,22 +157,27 @@ func runWorkflow(cmd *cobra.Command, args []string, validate workflowValidator) 
 		return errors.New("--output must be json or table")
 	}
 	showSecrets, _ := cmd.Flags().GetBool("show-secrets")
+	showSource, _ := cmd.Flags().GetBool("show-source")
+	if showSource && (output != "json" || workflowFlag(cmd, "revision") == "") {
+		return errors.New("--show-source requires --revision and --output json; use private output")
+	}
 	if showSecrets && output != "json" {
 		return errors.New("--show-secrets requires --output json")
 	}
 	for _, id := range args {
 		if _, err := uuid.Parse(id); err != nil {
-			return errors.New("workflow, revision, trigger, and run IDs must be UUIDs from documented reads")
+			return errors.New("workflow, revision, trigger, run, and collaborator user IDs must be UUIDs from documented reads")
 		}
 	}
 	operation := cmd.Name()
 	trigger := cmd.Parent().Name() == "trigger"
+	collaborator := cmd.Parent().Name() == "collaborator"
 	ctx, cancel := cli.APIContext(cmd.Context())
 	defer cancel()
 	body := map[string]any{}
 	var source string
 	var validation wr.Validation
-	if operation == "validate" || operation == "create" || operation == "update" && cmd.Flags().Changed("file") {
+	if operation == "validate" || operation == "create" || operation == "update" && !trigger && cmd.Flags().Changed("file") {
 		if operation == "update" {
 			v, _ := cmd.Flags().GetInt32("expected-version")
 			if !cmd.Flags().Changed("expected-version") || v < 0 {
@@ -190,7 +208,7 @@ func runWorkflow(cmd *cobra.Command, args []string, validate workflowValidator) 
 			return printWorkflowResult(output, validation)
 		}
 	}
-	if operation == "archive" || operation == "update" && source == "" {
+	if operation == "archive" || operation == "update" && !trigger && source == "" {
 		if cmd.Flags().Changed("expected-version") {
 			return errors.New("--expected-version requires --file")
 		}
@@ -237,6 +255,29 @@ func runWorkflow(cmd *cobra.Command, args []string, validate workflowValidator) 
 			body["cron_expression"] = workflowFlag(cmd, "cron")
 			body["timezone"] = workflowFlag(cmd, "timezone")
 		}
+	}
+	if trigger && operation == "update" {
+		for _, flag := range []string{"enabled", "label", "cron", "timezone"} {
+			if cmd.Flags().Changed(flag) {
+				if flag == "enabled" {
+					body[flag], _ = cmd.Flags().GetBool(flag)
+				} else if flag == "cron" {
+					body["cron_expression"] = workflowFlag(cmd, flag)
+				} else {
+					body[flag] = workflowFlag(cmd, flag)
+				}
+			}
+		}
+		if len(body) == 0 && !cmd.Flags().Changed("input-file") {
+			return errors.New("no trigger fields to update")
+		}
+	}
+	if collaborator && operation == "add" {
+		role := workflowFlag(cmd, "role")
+		if role != "viewer" && role != "editor" {
+			return errors.New("--role must be viewer or editor")
+		}
+		body["user_id"], body["role"] = args[1], role
 	}
 	if cmd.Flags().Changed("input-file") {
 		raw, err := readWorkflowFile(workflowFlag(cmd, "input-file"), service.WorkflowMaxPayloadBytes)
@@ -286,9 +327,19 @@ func runWorkflow(cmd *cobra.Command, args []string, validate workflowValidator) 
 			method = "POST"
 		case "remove":
 			method = "DELETE"
+		case "update":
+			method = "PATCH"
 		case "rotate-token":
 			method = "POST"
 			path += "/rotate-token"
+		}
+	} else if collaborator {
+		path += "/collaborators"
+		if operation == "add" {
+			method = "POST"
+		} else if operation == "remove" {
+			method = "DELETE"
+			path += "/" + args[1]
 		}
 	} else {
 		switch operation {
@@ -299,6 +350,10 @@ func runWorkflow(cmd *cobra.Command, args []string, validate workflowValidator) 
 			}
 		case "update", "archive":
 			method = "PATCH"
+		case "delete":
+			method = "DELETE"
+		case "revisions":
+			path += "/revisions"
 		case "run":
 			path += "/run"
 			method = "POST"
@@ -338,7 +393,7 @@ func runWorkflow(cmd *cobra.Command, args []string, validate workflowValidator) 
 			err = client.PatchJSON(ctx, path, body, &response)
 		case "DELETE":
 			err = client.DeleteJSON(ctx, path)
-			result = map[string]any{"removed": true, "id": args[1]}
+			result = map[string]any{"removed": true, "id": args[len(args)-1]}
 		}
 	}
 	if err != nil {
@@ -400,7 +455,16 @@ func runWorkflow(cmd *cobra.Command, args []string, validate workflowValidator) 
 	}
 	// Reuse the product's recursive credential projection. Lists are sanitized
 	// item by item so normal multi-row reads do not hit the input-size bound.
+	var definition any
+	if showSource {
+		if view, ok := result.(map[string]any); ok {
+			definition = view["definition"]
+		}
+	}
 	result = sanitizeWorkflowResult(result)
+	if showSource && definition != nil {
+		result.(map[string]any)["definition"] = definition
+	}
 	if showSecrets && token != "" {
 		if view, ok := result.(map[string]any); ok {
 			view["token"] = token

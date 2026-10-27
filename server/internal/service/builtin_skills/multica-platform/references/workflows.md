@@ -12,7 +12,7 @@ Start with `multica workflow list --output json`, then
 `multica workflow get <workflow-id> --output json`. IDs are full UUIDs from reads,
 not display names or slugs. All commands accept `--output json` (the default);
 JSON goes to stdout, warnings to stderr. Revision `definition` source is redacted
-from CLI responses. Never merge stderr into parsed output.
+by default. Never merge stderr into parsed output.
 The shared `--server-url`, `--workspace-id`, profile and task-token rules apply.
 
 Source is accepted only through `--file`: a regular UTF-8 TypeScript file, read
@@ -24,16 +24,35 @@ by your installation. Validation uses the existing credential-free local runner;
 it imports trusted source with local OS-user privileges. It needs no engine
 credentials, runtime enrollment, or workspace API access. Import restrictions,
 resource bounds, and a subprocess are not a security sandbox.
+Task agents automatically receive the daemon's configured local Node and runner
+paths when both are absolute regular files and Node reports version 22+ at daemon
+startup. This authoring setup requires no custom instructions or skill binding.
+If the paths are absent or invalid, ask the operator to configure the packaged
+tools and restart the daemon. Local authoring configuration does not enable
+workflow execution or supply engine credentials.
 
 ```bash
 multica workflow validate --file ./workflow-source --output json
 multica workflow create --name 'Review build' --slug review-build --file ./workflow-source --output json
 multica workflow get <workflow-id> --output json
 multica workflow get <workflow-id> --revision <revision-id> --output json
+multica workflow revisions <workflow-id> --limit 50 --offset 0 --output json
+multica workflow get <workflow-id> --revision <revision-id> --show-source --output json
 multica workflow update <workflow-id> --file ./workflow-source --expected-version <observed-definition-version> --output json
 multica workflow update <workflow-id> --name 'Review release' --expected-updated-at '<observed-updated-at>' --output json
 multica workflow archive <workflow-id> --expected-updated-at '<observed-updated-at>' --output json
+multica workflow delete <workflow-id> --output json
 ```
+
+`get --show-source` requires an explicit `--revision` and JSON output. It returns
+the revision's authored `definition` for private inspection or editing. Source
+can contain sensitive text; keep this opt-in output out of shared transcripts,
+comments, and logs. Other credential redaction still applies.
+
+`archive` preserves workflow history and requires the observed timestamp.
+`delete` permanently removes the workflow and its history, has no CAS timestamp
+or confirmation prompt, and cannot be undone. Use it only when permanent deletion
+is requested.
 
 `validate` returns `hash`, extracted `graph`, and `graph_digest`; it does not
 publish or execute steps. `create` validates locally before any write, creates
@@ -111,13 +130,17 @@ proof that source agrees with it; the trusted daemon extracts and verifies it.
 multica workflow trigger list <workflow-id> --output json
 multica workflow trigger add <workflow-id> --kind schedule --cron '0 9 * * 1-5' --timezone Asia/Shanghai --output json
 multica workflow trigger add <workflow-id> --kind api --output json
+multica workflow trigger update <workflow-id> <trigger-id> --enabled=false --output json
+multica workflow trigger update <workflow-id> <trigger-id> --cron '0 10 * * 1-5' --timezone Asia/Shanghai --label 'Morning review' --input-file ./input.json --output json
 multica workflow trigger remove <workflow-id> <trigger-id> --output json
 multica workflow trigger rotate-token <workflow-id> <trigger-id> --output json
 ```
 
 Schedule cron has five fields; timezone is an IANA name, default UTC. `add` also
 accepts `--label`, `--enabled=false`, and `--input-file ./input.json`. API triggers
-do not accept cron/timezone flags. Triggers always select the current revision,
+do not accept cron/timezone flags. `update` accepts those same mutable fields and
+sends only explicitly supplied changes; it cannot change the trigger kind.
+Triggers always select the current revision,
 cannot pin a version, and permanently retain the human creator as principal;
 membership is rechecked on every fire. Missing/departed principals yield visible
 `skipped` runs. Authoring, archive, and trigger management use creator,
@@ -126,6 +149,17 @@ cannot write; only creator/owner/admin manages collaborators. Agent tasks use
 the current human originator's grants and keep agent audit identity separately;
 terminal/unattributed tasks cannot author. Never replace a rejected task token
 with a member/profile credential.
+
+```bash
+multica workflow collaborator list <workflow-id> --output json
+multica workflow collaborator add <workflow-id> <user-id> --role editor --output json
+multica workflow collaborator remove <workflow-id> <user-id> --output json
+```
+
+Collaborator IDs identify human workspace members, not agents. `add` requires
+`--role viewer|editor`; a viewer can inspect, while an editor can author and
+manage triggers. Creator/owner/admin authority is required to add or remove
+collaborators. Read the current list before changing access.
 
 API creation/rotation returns a bearer token once. CLI output redacts it by
 default. To deliberately capture it privately, append `--show-secrets --output
@@ -180,7 +214,7 @@ UUID, uses the current revision and earlier input, and can incur real work/budge
 it is not an engine replay pinned to the old revision. HTTP202 acknowledges local
 admission, not completed execution. Read persisted run/step state to track it.
 
-`list`, `runs`, and `logs` return one page: `--limit`1–100 (default50), `--offset`
+`list`, `revisions`, `runs`, and `logs` return one page: `--limit`1–100 (default50), `--offset`
 0–100000. The matching HTTP query parameters are `limit` and `offset`. Advance
 offset by the number of returned rows; an empty/short page ends that current
 view. There is no automatic tail/follow or hidden full-history pull. Logs are a
