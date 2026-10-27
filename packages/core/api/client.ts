@@ -4559,6 +4559,16 @@ export class ApiClient {
   async getWorkflow(id: string): Promise<Workflow | null> {
     return parseWithFallback(await this.fetch<unknown>(`/api/workflows/${id}`), WorkflowSchema, null, { endpoint: "GET /api/workflows/:id" });
   }
+  async updateWorkflow(id: string, data: { name?: string; description?: string; status?: "active" | "paused"; expectedUpdatedAt: string }): Promise<void> {
+    const { expectedUpdatedAt, ...fields } = data;
+    const result = parseWithFallback(await this.fetch<unknown>(`/api/workflows/${id}`, { method: "PATCH", body: JSON.stringify({ ...fields, expected_updated_at: expectedUpdatedAt }) }), WorkflowSchema, null, { endpoint: "PATCH /api/workflows/:id" });
+    if (!result) throw new Error("workflow_invalid_response");
+  }
+  async createWorkflowRun(id: string, input: WorkflowRun["input"]): Promise<WorkflowRun> {
+    const result = parseWithFallback<WorkflowRun | null>(await this.fetch<unknown>(`/api/workflows/${id}/run`, { method: "POST", body: JSON.stringify({ input }) }), WorkflowRunSchema, null, { endpoint: "POST /api/workflows/:id/run" });
+    if (!result) throw new Error("workflow_invalid_response");
+    return result;
+  }
   async listWorkflowRevisions(id: string, offset = 0): Promise<WorkflowRevision[]> {
     return parseWithFallback(await this.fetch<unknown>(`/api/workflows/${id}/revisions?limit=25&offset=${offset}`), WorkflowRevisionSchema.array(), [], { endpoint: "GET /api/workflows/:id/revisions" });
   }

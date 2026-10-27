@@ -64,12 +64,13 @@ export const WorkflowSchema = z.object({
   description: z.string().nullable().optional(), status: z.string(),
   current_revision_id: workflowId.nullable().optional(), definition_version: z.number().int().nonnegative(),
   last_run_at: workflowTime, next_run_at: workflowTime,
+  updated_at: workflowTime,
   trigger_kinds: z.array(z.string()).optional().default([]),
   can_write: z.boolean().optional().default(false),
   runtime_availability: WorkflowAvailabilitySchema.optional().default({ state: "unknown" }),
 }).transform((v) => ({ id: v.id, workspaceId: v.workspace_id, name: v.name, slug: v.slug,
   description: v.description ?? "", status: v.status, currentRevisionId: v.current_revision_id ?? null,
-  definitionVersion: v.definition_version, lastRunAt: v.last_run_at, nextRunAt: v.next_run_at,
+  definitionVersion: v.definition_version, lastRunAt: v.last_run_at, nextRunAt: v.next_run_at, updatedAt: v.updated_at,
   triggerKinds: v.trigger_kinds, canWrite: v.can_write, runtimeAvailability: v.runtime_availability }));
 export const WorkflowGraphSchema = z.object({ steps: z.array(z.object({
   id: z.string().min(1).max(128), parents: z.array(z.string()).nullish().transform((v) => v ?? []),
